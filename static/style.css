@@ -153,7 +153,7 @@ body {
 }
 
 /* ============ Game Screen ============ */
-#game-screen { min-height: 100vh; }
+#game-screen { min-height: 100vh; position: relative; }
 
 #game-header {
   display: flex;
@@ -221,6 +221,7 @@ body {
   grid-template-columns: repeat(4, var(--card-w));
   gap: 6px;
   padding: 4px;
+  min-height: calc((var(--card-h) + 6px) * 2);
 }
 
 /* Deck display */
@@ -254,69 +255,134 @@ body {
   font-weight: 700;
 }
 
+/* ============ Card structure ============ */
 .card {
   width: var(--card-w);
   height: var(--card-h);
   border-radius: var(--card-radius);
   position: relative;
   cursor: default;
-  transition: all 0.15s;
   border: 2px solid transparent;
-  overflow: hidden;
-  background: #1a1a0e;
+  background: transparent;
+  perspective: 900px;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    opacity 0.18s ease,
+    filter 0.18s ease;
+  will-change: transform;
 }
 
-.card img {
+.card .card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0s;
+}
+.card.flipping .card-inner { transition: transform 0.42s cubic-bezier(.22,1,.36,1); }
+.card.flipped .card-inner { transform: rotateY(180deg); }
+
+.card .card-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--card-radius);
+  overflow: hidden;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.35);
+  background: #1a1a0e;
+}
+.card .card-front { transform: rotateY(0deg); }
+.card .card-back  { transform: rotateY(180deg); }
+
+.card .card-face img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: calc(var(--card-radius) - 2px);
+  border-radius: var(--card-radius);
   pointer-events: none;
+  display: block;
 }
 
 .card.selectable {
   cursor: pointer;
   border-color: var(--gold);
-  box-shadow: 0 0 8px rgba(200, 168, 78, 0.4);
+  box-shadow: 0 0 8px rgba(200, 168, 78, 0.45);
 }
 .card.selectable:hover {
   transform: translateY(-6px);
-  box-shadow: 0 4px 16px rgba(200, 168, 78, 0.6);
+  box-shadow: 0 8px 18px rgba(200, 168, 78, 0.65);
 }
 .card.playable {
   cursor: pointer;
-  opacity: 0.7;
+  opacity: 0.68;
 }
 .card.playable:hover {
   opacity: 1;
   transform: translateY(-4px);
 }
-.card.selected {
-  border-color: #fff;
-  transform: translateY(-8px);
-  box-shadow: 0 4px 20px rgba(255, 255, 255, 0.5);
-}
 .card.pending {
   border-color: #f39c12;
-  box-shadow: 0 0 12px rgba(243, 156, 18, 0.6);
+  box-shadow: 0 0 12px rgba(243, 156, 18, 0.55);
+  animation: pendingPulse 1.6s ease-in-out infinite;
+}
+@keyframes pendingPulse {
+  0%, 100% { box-shadow: 0 0 10px rgba(243, 156, 18, 0.45); }
+  50%      { box-shadow: 0 0 18px rgba(243, 156, 18, 0.85); }
 }
 .card.dimmed {
   opacity: 0.25;
-  filter: grayscale(0.6);
-  transition: opacity 0.15s, filter 0.15s;
+  filter: grayscale(0.55);
 }
 .card.highlight-match {
   border-color: var(--gold);
-  box-shadow: 0 0 10px rgba(200, 168, 78, 0.5);
+  box-shadow: 0 0 12px rgba(200, 168, 78, 0.7);
+  transform: translateY(-2px);
+}
+.card.capture-glow {
+  border-color: #fff;
+  box-shadow: 0 0 20px rgba(255, 240, 170, 0.9);
+  animation: captureShine 0.25s ease-out;
+}
+@keyframes captureShine {
+  0%   { filter: brightness(1); }
+  40%  { filter: brightness(1.35); }
+  100% { filter: brightness(1); }
+}
+.card.just-drawn {
+  border-color: #f0d060;
+  box-shadow: 0 0 14px rgba(240, 208, 96, 0.7);
+}
+.card.yaku-glow {
+  animation: yakuGlow 1.4s ease-in-out infinite;
+  border-color: var(--gold);
+}
+@keyframes yakuGlow {
+  0%, 100% { box-shadow: 0 0 8px rgba(200,168,78,0.4); }
+  50%      { box-shadow: 0 0 22px rgba(255,215,100,1); }
 }
 
-/* Card back image variant */
-.card-back-img {
-  border: 1px solid #4a3a6a;
+/* Opp hand back cards — rendered as a single back image (no flip structure) */
+.card.opp-back {
+  cursor: default;
+  perspective: none;
+  background: #1a1a0e;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.35);
+}
+.card.opp-back .card-plain-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--card-radius);
+  pointer-events: none;
+  display: block;
 }
 
-
-/* ============ Captured zone (grouped) ============ */
+/* ============ Captured zone ============ */
 .captured-grouped {
   display: flex;
   flex-direction: column;
@@ -328,6 +394,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 22px;
 }
 .cap-label {
   font-size: 0.6rem;
@@ -340,6 +407,8 @@ body {
 .cap-row {
   display: flex;
   gap: 3px;
+  flex-wrap: wrap;
+  min-height: 60px;
 }
 .captured-grouped .card {
   --card-w: 42px;
@@ -348,9 +417,12 @@ body {
   height: var(--card-h);
 }
 
+/* Player cap zone on screen */
+#player-captured { min-height: 60px; }
+
 /* ============ Opponent hand ============ */
 .opp-hand-row {
-  min-height: calc(var(--card-h) * 0.55 + 4px);
+  min-height: calc(60px + 4px);
 }
 .opp-hand-row .card {
   --card-w: 42px;
@@ -359,37 +431,126 @@ body {
   height: var(--card-h);
 }
 
-/* ============ Card animations ============ */
-@keyframes cardEnter {
-  0% { opacity: 0; transform: translateY(-24px) scale(0.7); }
-  60% { opacity: 1; transform: translateY(3px) scale(1.02); }
-  100% { opacity: 1; transform: translateY(0) scale(1); }
+/* ============ Animation overlay ============ */
+#anim-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 500;
 }
-@keyframes cardExit {
-  0% { opacity: 1; transform: translateY(0) scale(1); }
-  100% { opacity: 0; transform: translateY(24px) scale(0.7); }
+#anim-overlay .card {
+  position: absolute;
+  box-shadow: 0 8px 18px rgba(0,0,0,0.45);
 }
-.card-enter { animation: cardEnter 0.5s ease-out; }
-.card-exit { animation: cardExit 0.45s ease-in forwards; pointer-events: none; }
 
-/* ============ Opponent action log ============ */
-#opp-action-log {
+/* ============ Yaku banner ============ */
+.yaku-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 220;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.yaku-banner-inner {
+  background: linear-gradient(160deg, #3b2410 0%, #150b04 100%);
+  border: 2px solid var(--gold);
+  border-radius: 16px;
+  padding: 24px 48px;
   text-align: center;
-  padding: 8px 16px;
-  color: #f5b7b1;
-  font-size: 0.95rem;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(200,168,78,0.35);
+  min-width: 260px;
+}
+.yaku-heading {
+  font-size: 2.4rem;
+  color: var(--gold);
+  letter-spacing: 0.35em;
+  text-shadow: 0 3px 8px rgba(0,0,0,0.6), 0 0 18px rgba(255,215,100,0.6);
+  margin-bottom: 6px;
+}
+.yaku-who {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+  letter-spacing: 0.2em;
+}
+.yaku-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.yaku-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 1.05rem;
+}
+.yaku-list .yaku-name { color: var(--text); font-weight: 700; }
+.yaku-list .yaku-pts { color: var(--red); font-weight: 700; }
+.yaku-total {
+  font-size: 1rem;
+  color: var(--gold);
+  margin-top: 6px;
+  border-top: 1px solid rgba(200,168,78,0.4);
+  padding-top: 8px;
+  letter-spacing: 0.1em;
+}
+
+/* ============ Call banner (koikoi / 勝負 / 流局) ============ */
+.call-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 210;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.call-inner {
+  padding: 20px 56px;
+  border-radius: 14px;
+  font-size: 2.4rem;
   font-weight: 700;
-  letter-spacing: 0.05em;
-  background: linear-gradient(90deg, transparent, rgba(139,0,0,0.3), transparent);
-  min-height: 36px;
+  letter-spacing: 0.35em;
+  text-shadow: 0 3px 10px rgba(0,0,0,0.6);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  border: 2px solid;
 }
-@keyframes logFade {
-  0% { opacity: 0; transform: translateY(-8px); }
-  12% { opacity: 1; transform: translateY(0); }
-  85% { opacity: 1; }
-  100% { opacity: 0.5; }
+.call-me {
+  background: linear-gradient(160deg, #1a5276 0%, #0e2c3f 100%);
+  color: #cfe8f8;
+  border-color: #5dade2;
+  text-shadow: 0 3px 10px rgba(0,0,0,0.6), 0 0 20px rgba(93,173,226,0.5);
 }
-.log-fade { animation: logFade 1.8s ease-out forwards; }
+.call-opp {
+  background: linear-gradient(160deg, #7b241c 0%, #2a0d0a 100%);
+  color: #f5c7c2;
+  border-color: #c0392b;
+  text-shadow: 0 3px 10px rgba(0,0,0,0.6), 0 0 20px rgba(192,57,43,0.5);
+}
+.call-neutral {
+  background: linear-gradient(160deg, #3b2410 0%, #150b04 100%);
+  color: var(--gold);
+  border-color: var(--gold);
+}
+
+.banner-in { animation: bannerIn 320ms cubic-bezier(.22,1,.36,1); }
+.banner-out { animation: bannerOut 280ms cubic-bezier(.4,0,.7,0.1) forwards; }
+@keyframes bannerIn {
+  0%   { opacity: 0; transform: scale(1.25); }
+  60%  { opacity: 1; transform: scale(0.97); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.yaku-banner.banner-in .yaku-banner-inner { animation: bannerIn 400ms cubic-bezier(.22,1,.36,1); }
+.yaku-banner.banner-out .yaku-banner-inner { animation: bannerOut 280ms cubic-bezier(.4,0,.7,0.1) forwards; }
+.call-banner.banner-in .call-inner { animation: bannerIn 320ms cubic-bezier(.22,1,.36,1); }
+.call-banner.banner-out .call-inner { animation: bannerOut 280ms cubic-bezier(.4,0,.7,0.1) forwards; }
+@keyframes bannerOut {
+  0%   { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.9); }
+}
 
 /* ============ Modals ============ */
 .modal {
@@ -399,7 +560,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 300;
 }
 .modal-content {
   background: var(--board);
@@ -408,6 +569,11 @@ body {
   padding: 32px 48px;
   text-align: center;
   max-width: 400px;
+  animation: modalIn 320ms cubic-bezier(.22,1,.36,1);
+}
+@keyframes modalIn {
+  0%   { opacity: 0; transform: scale(0.92) translateY(12px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 .modal-content h2 {
   color: var(--gold);
@@ -470,7 +636,7 @@ body {
   width: 320px;
   background: rgba(20, 20, 10, 0.95);
   border-left: 1px solid #444;
-  z-index: 50;
+  z-index: 150;
   display: flex;
   flex-direction: column;
 }
@@ -533,10 +699,6 @@ body {
     --card-w: 52px;
     --card-h: 78px;
   }
-  .captured-zone .card {
-    --card-w: 36px;
-    --card-h: 52px;
-  }
   .opp-hand-row .card {
     --card-w: 34px;
     --card-h: 50px;
@@ -549,4 +711,6 @@ body {
   #player-area { max-width: 240px; right: 6px; bottom: 6px; padding: 6px; }
   #kifu-panel { width: 260px; }
   .modal-content { padding: 20px 24px; margin: 0 12px; }
+  .yaku-heading { font-size: 1.8rem; }
+  .call-inner { font-size: 1.6rem; padding: 14px 28px; }
 }

@@ -33,7 +33,8 @@ class GameSession:
         self.opponent = opponent
         self.kifu = {"rounds": [], "total_rounds": total_rounds}
         self._round_actions = []
-        self._last_opponent_actions = []
+        self._last_transitions = []
+        self._round_fresh = True
         self._start_round()
 
     def _start_round(self):
@@ -47,8 +48,17 @@ class GameSession:
                 break
             break
         self._round_actions = []
+        self._round_fresh = True
+        # Capture the freshly-dealt snapshot so the client can animate
+        # a deal from the deck before any opponent-oya moves are played.
+        self._deal_snapshot = self._snapshot()
+        # If the opponent is the oya, their first turn is computed now
+        # but delivered in transitions so the client plays them after
+        # the deal animation finishes.
+        opening_transitions: list = []
         if not self.engine.done:
-            self._play_opponent_if_needed()
+            self._play_opponent_if_needed(opening_transitions)
+        self._last_transitions = opening_transitions
 
     def _record_special(self, special):
         if special and ("teshi" in special or "kuttsuki" in special):
@@ -64,28 +74,87 @@ class GameSession:
                 "actions": [],
             })
 
-    def _play_opponent_if_needed(self):
-        self._last_opponent_actions = []
+    def _snapshot(self):
+        e = self.engine
+        pending = e._pending_played.id if e._pending_played is not None else None
+        return {
+            "hand": sorted([c.id for c in e.players_hand[0]]),
+            "field": sorted([c.id for c in e.field], key=lambda i: e.card_by_id(i).month),
+            "player_captured": sorted([c.id for c in e.players_captured[0]]),
+            "opponent_captured": sorted([c.id for c in e.players_captured[1]]),
+            "opponent_hand_count": len(e.players_hand[1]),
+            "deck_remaining": len(e.deck),
+            "phase": e.phase.name,
+            "current_player": e.current_player,
+            "pending_card": pending,
+            "done": e.done,
+        }
+
+    @staticmethod
+    def _serialize_events(raw_events):
+        out = []
+        for ev in raw_events:
+            kind = ev[0]
+            rest = ev[1:]
+            if kind in ("hand_no_match", "draw"):
+                out.append({"type": kind, "card": rest[0]})
+            elif kind in ("hand_match", "draw_match"):
+                out.append({"type": kind, "card": rest[0], "matched": rest[1]})
+            elif kind in ("hand_match_all", "draw_match_all"):
+                out.append({"type": kind, "card": rest[0], "matched": list(rest[1])})
+            elif kind in ("hand_choose", "draw_choose"):
+                out.append({"type": kind, "card": rest[0], "candidates": list(rest[1])})
+            elif kind == "yaku_formed":
+                out.append({
+                    "type": kind,
+                    "player": rest[0],
+                    "yaku": [list(y) for y in rest[1]],
+                    "points": rest[2],
+                })
+            elif kind == "koikoi":
+                out.append({"type": kind, "player": rest[0]})
+            elif kind == "showdown":
+                out.append({"type": kind, "player": rest[0], "points": rest[1]})
+            elif kind == "round_end":
+                out.append({"type": kind, "winner": rest[0], "points": rest[1]})
+            elif kind == "exhausted":
+                out.append({"type": kind})
+            elif kind == "bonus_7plus":
+                out.append({"type": kind})
+            elif kind == "bonus_opponent_koikoi":
+                out.append({"type": kind})
+            else:
+                out.append({"type": kind, "args": list(rest)})
+        return out
+
+    def _do_step(self, actor, action, transitions):
+        phase_before = self.engine.phase.name
+        card_id = action if action < NUM_CARDS else None
+        if action < NUM_CARDS:
+            card_name = self.engine.card_by_id(action).name
+        elif action == ACTION_KOIKOI:
+            card_name = "こいこい"
+        elif action == ACTION_SHOWDOWN:
+            card_name = "勝負"
+        else:
+            card_name = None
+        self._record_action(actor, action)
+        info = self.engine.step(action)
+        transitions.append({
+            "actor": actor,
+            "phase_before": phase_before,
+            "action": action,
+            "card_id": card_id,
+            "card_name": card_name,
+            "events": self._serialize_events(info.get("events", [])),
+            "snapshot": self._snapshot(),
+        })
+
+    def _play_opponent_if_needed(self, transitions):
         while (not self.engine.done and
                self.engine.current_player == 1):
             action = self._get_opponent_action()
-            phase = self.engine.phase.name
-            card_id = action if action < NUM_CARDS else None
-            card_name = None
-            if action < NUM_CARDS:
-                card_name = self.engine.card_by_id(action).name
-            elif action == ACTION_KOIKOI:
-                card_name = "こいこい"
-            elif action == ACTION_SHOWDOWN:
-                card_name = "勝負"
-            self._last_opponent_actions.append({
-                "phase": phase,
-                "action": action,
-                "card_id": card_id,
-                "card_name": card_name,
-            })
-            self._record_action(1, action)
-            self.engine.step(action)
+            self._do_step(1, action, transitions)
 
     def _get_opponent_action(self):
         return rule_based_policy(self.engine, 1)
@@ -107,18 +176,18 @@ class GameSession:
         })
 
     def do_action(self, action):
-        events = []
-        self._record_action(0, action)
-        info = self.engine.step(action)
-        events.extend(info.get("events", []))
+        transitions = []
+        self._do_step(0, action, transitions)
 
         if not self.engine.done:
-            self._play_opponent_if_needed()
+            self._play_opponent_if_needed(transitions)
 
         if self.engine.done:
             self._finish_round()
 
-        return events
+        self._last_transitions = transitions
+        self._round_fresh = False
+        return transitions
 
     def _finish_round(self):
         winner = self.engine.winner
@@ -170,6 +239,7 @@ class GameSession:
 
         return {
             "phase": e.phase.name,
+            "current_player": e.current_player,
             "hand": hand_ids,
             "field": field_ids,
             "player_captured": p_cap,
@@ -192,7 +262,9 @@ class GameSession:
             "scores": list(self.scores),
             "oya": self.oya,
             "game_over": game_over,
-            "opponent_actions": getattr(self, "_last_opponent_actions", []),
+            "transitions": getattr(self, "_last_transitions", []),
+            "round_fresh": getattr(self, "_round_fresh", False),
+            "deal_snapshot": getattr(self, "_deal_snapshot", None),
         }
 
     def save_kifu(self):

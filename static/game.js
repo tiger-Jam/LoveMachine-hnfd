@@ -1,5 +1,9 @@
 "use strict";
 
+// ================================================================
+// Phase / timings
+// ================================================================
+
 const PHASE_MSG = {
   HAND_PLAY: "手札からカードを選んでください",
   HAND_MATCH: "取るカードを選んでください",
@@ -8,13 +12,35 @@ const PHASE_MSG = {
   DONE: "",
 };
 
-let CARDS = [];
-let state = null;
-let prevState = null;
-let kifuOpen = false;
-let animating = false;
+const T = {
+  deal_stagger: 55,
+  deal_fly: 280,
+  fly: 360,
+  flip: 420,
+  pause_meet: 220,
+  pause_after: 240,
+  banner_hold: 900,
+  yaku_hold: 1400,
+  opp_pre: 380,
+};
 
-// ============ Init ============
+// ================================================================
+// Globals
+// ================================================================
+
+let CARDS = [];
+let state = null;         // last server state (the authoritative target)
+let animating = false;
+let kifuOpen = false;
+let pendingCardId = null; // card currently sitting on the field awaiting match choice
+let visibleDeckCount = 0;
+
+const cardEls = {};       // id -> HTMLElement
+const oppHandBacks = [];  // queue of face-down opp hand placeholder elements
+
+// ================================================================
+// Init
+// ================================================================
 
 document.addEventListener("DOMContentLoaded", async () => {
   CARDS = await api("GET", "/api/cards");
@@ -34,8 +60,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-back-title").onclick = backToTitle;
 });
 
-// ============ API ============
-
 async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
@@ -43,18 +67,27 @@ async function api(method, path, body) {
   return resp.json();
 }
 
-// ============ Navigation ============
-
 function showScreen(id) {
   document.querySelectorAll(".screen").forEach(s => s.classList.add("hidden"));
   $(id).classList.remove("hidden");
 }
 
 function backToTitle() {
+  animating = false;
+  hideAllModals();
+  clearBoard();
   showScreen("start-screen");
 }
 
-// ============ Game Flow ============
+function hideAllModals() {
+  hideModal("koikoi-modal");
+  hideModal("round-result-modal");
+  hideModal("game-over-modal");
+}
+
+// ================================================================
+// Game flow
+// ================================================================
 
 function readRules() {
   return {
@@ -69,32 +102,58 @@ function readRules() {
 async function startGame() {
   const rounds = parseInt($("round-select").value);
   const rules = readRules();
-  prevState = null;
+  clearBoard();
   state = await api("POST", "/api/new_game", { rounds, rules });
   showScreen("game-screen");
-  $("opp-hand-cards").innerHTML = "";
-  $("opp-action-log").classList.add("hidden");
-  render();
-}
-
-async function doAction(action) {
-  if (animating) return;
-  prevState = state;
-  state = await api("POST", "/api/action", { action });
-  await renderWithOpponentAnimation();
+  ensureCapturedStructure("player-captured");
+  ensureCapturedStructure("opponent-captured");
+  await beginRound();
 }
 
 async function nextRound() {
   hideModal("round-result-modal");
-  prevState = null;
-  $("opp-hand-cards").innerHTML = "";
-  $("opp-action-log").classList.add("hidden");
+  clearBoard();
   state = await api("POST", "/api/next_round");
   if (state.round_started === false) {
     showGameOver();
-  } else {
-    render();
+    return;
   }
+  await beginRound();
+}
+
+async function beginRound() {
+  animating = true;
+  renderHeader();
+  hideModal("koikoi-modal");
+  hideModal("round-result-modal");
+  hideModal("game-over-modal");
+  await animateInitialDeal(state.deal_snapshot);
+
+  // Any opening opponent moves (opponent as oya)
+  if (state.transitions && state.transitions.length > 0) {
+    await runTransitions(state.transitions);
+  }
+
+  animating = false;
+  await finalizeFromState(state);
+}
+
+async function doAction(action) {
+  if (animating) return;
+  animating = true;
+  clearFieldHighlight();
+  applyInteractivity(null); // disable clicks while animating
+  hideModal("koikoi-modal");
+
+  const resp = await api("POST", "/api/action", { action });
+  state = resp;
+
+  if (state.transitions && state.transitions.length > 0) {
+    await runTransitions(state.transitions);
+  }
+
+  animating = false;
+  await finalizeFromState(state);
 }
 
 async function saveKifu() {
@@ -104,18 +163,873 @@ async function saveKifu() {
   }
 }
 
-// ============ Render ============
+// ================================================================
+// DOM registry
+// ================================================================
 
-function render() {
+function makeCardEl(id) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.dataset.cardId = id;
+
+  const inner = document.createElement("div");
+  inner.className = "card-inner";
+
+  const front = document.createElement("div");
+  front.className = "card-face card-front";
+  const fimg = document.createElement("img");
+  fimg.src = `/cards/${id}.svg`;
+  fimg.alt = CARDS[id].name;
+  fimg.draggable = false;
+  front.appendChild(fimg);
+
+  const back = document.createElement("div");
+  back.className = "card-face card-back";
+  const bimg = document.createElement("img");
+  bimg.src = "/cards/back.svg";
+  bimg.alt = "裏";
+  bimg.draggable = false;
+  back.appendChild(bimg);
+
+  inner.appendChild(front);
+  inner.appendChild(back);
+  el.appendChild(inner);
+  return el;
+}
+
+function cardEl(id) {
+  if (!cardEls[id]) cardEls[id] = makeCardEl(id);
+  return cardEls[id];
+}
+
+function makeOppBackEl() {
+  const el = document.createElement("div");
+  el.className = "card opp-back";
+  const img = document.createElement("img");
+  img.src = "/cards/back.svg";
+  img.alt = "裏";
+  img.draggable = false;
+  img.className = "card-plain-img";
+  el.appendChild(img);
+  return el;
+}
+
+// ================================================================
+// Zone helpers
+// ================================================================
+
+const CAP_TYPES = ["光", "種", "短冊", "カス"];
+const CAP_LABELS = { "光": "光", "種": "タネ", "短冊": "タン", "カス": "カス" };
+
+function ensureCapturedStructure(containerId) {
+  const container = $(containerId);
+  if (container.dataset.inited === "1") return;
+  container.dataset.inited = "1";
+  container.innerHTML = "";
+  for (const t of CAP_TYPES) {
+    const section = document.createElement("div");
+    section.className = "cap-section";
+    section.dataset.capType = t;
+
+    const label = document.createElement("div");
+    label.className = "cap-label";
+    label.textContent = `${CAP_LABELS[t]} 0`;
+
+    const row = document.createElement("div");
+    row.className = "cap-row";
+
+    section.appendChild(label);
+    section.appendChild(row);
+    container.appendChild(section);
+  }
+}
+
+function capRow(containerId, type) {
+  return $(containerId).querySelector(`.cap-section[data-cap-type="${type}"] .cap-row`);
+}
+
+function updateCapLabels(containerId) {
+  const container = $(containerId);
+  for (const section of container.children) {
+    const t = section.dataset.capType;
+    const row = section.querySelector(".cap-row");
+    section.querySelector(".cap-label").textContent = `${CAP_LABELS[t]} ${row.children.length}`;
+  }
+}
+
+function capInsertRef(containerId, id) {
+  const type = CARDS[id].card_type;
+  const row = capRow(containerId, type);
+  const month = CARDS[id].month;
+  for (const child of row.children) {
+    const cid = Number(child.dataset.cardId);
+    if (CARDS[cid].month > month) return { row, ref: child };
+    if (CARDS[cid].month === month && cid > id) return { row, ref: child };
+  }
+  return { row, ref: null };
+}
+
+function fieldInsertRef(id) {
+  const row = $("field-cards");
+  const month = CARDS[id].month;
+  for (const child of row.children) {
+    const cid = Number(child.dataset.cardId);
+    if (CARDS[cid].month > month) return { row, ref: child };
+    if (CARDS[cid].month === month && cid > id) return { row, ref: child };
+  }
+  return { row, ref: null };
+}
+
+function handInsertRef(id) {
+  const row = $("hand-cards");
+  for (const child of row.children) {
+    const cid = Number(child.dataset.cardId);
+    if (cid > id) return { row, ref: child };
+  }
+  return { row, ref: null };
+}
+
+// ================================================================
+// Overlay / FLIP
+// ================================================================
+
+function overlay() { return $("anim-overlay"); }
+
+function placeAtOverlay(el, rect) {
+  overlay().appendChild(el);
+  el.style.position = "absolute";
+  el.style.left = rect.left + "px";
+  el.style.top = rect.top + "px";
+  el.style.width = rect.width + "px";
+  el.style.height = rect.height + "px";
+  el.style.margin = "0";
+  el.style.transform = "";
+  el.style.transition = "";
+}
+
+function clearOverlayStyles(el) {
+  el.style.position = "";
+  el.style.left = "";
+  el.style.top = "";
+  el.style.width = "";
+  el.style.height = "";
+  el.style.margin = "";
+  el.style.transform = "";
+  el.style.transition = "";
+  el.style.transformOrigin = "";
+  el.style.zIndex = "";
+}
+
+async function flipTo(el, place, opts = {}) {
+  const duration = opts.duration ?? T.fly;
+  const easing = opts.easing ?? "cubic-bezier(.22,1,.36,1)";
+  const fromRect = el.getBoundingClientRect();
+
+  clearOverlayStyles(el);
+  place(el);
+
+  const toRect = el.getBoundingClientRect();
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  const sw = toRect.width === 0 ? 1 : fromRect.width / toRect.width;
+  const sh = toRect.height === 0 ? 1 : fromRect.height / toRect.height;
+
+  el.style.transformOrigin = "top left";
+  el.style.transition = "none";
+  el.style.transform = `translate(${dx}px, ${dy}px) scale(${sw}, ${sh})`;
+  void el.offsetWidth;
+  el.style.transition = `transform ${duration}ms ${easing}`;
+  el.style.transform = "";
+
+  await sleep(duration);
+  el.style.transition = "";
+  el.style.transformOrigin = "";
+}
+
+async function flyToPoint(el, rect, opts = {}) {
+  // el must already be in overlay (absolute-positioned)
+  const duration = opts.duration ?? T.fly;
+  const easing = opts.easing ?? "cubic-bezier(.22,1,.36,1)";
+
+  const curRect = el.getBoundingClientRect();
+
+  el.style.transition = "none";
+  el.style.left = rect.left + "px";
+  el.style.top = rect.top + "px";
+  el.style.width = rect.width + "px";
+  el.style.height = rect.height + "px";
+
+  const newRect = el.getBoundingClientRect();
+  const dx = curRect.left - newRect.left;
+  const dy = curRect.top - newRect.top;
+  const sw = newRect.width === 0 ? 1 : curRect.width / newRect.width;
+  const sh = newRect.height === 0 ? 1 : curRect.height / newRect.height;
+
+  el.style.transformOrigin = "top left";
+  el.style.transform = `translate(${dx}px, ${dy}px) scale(${sw}, ${sh})`;
+  void el.offsetWidth;
+  el.style.transition = `transform ${duration}ms ${easing}`;
+  el.style.transform = "";
+
+  await sleep(duration);
+  el.style.transition = "";
+  el.style.transformOrigin = "";
+}
+
+// ================================================================
+// Initial deal
+// ================================================================
+
+function clearBoard() {
+  pendingCardId = null;
+  oppHandBacks.length = 0;
+  for (const id in cardEls) delete cardEls[id];
+  const zones = ["hand-cards", "field-cards", "opp-hand-cards"];
+  for (const z of zones) { const el = $(z); if (el) el.innerHTML = ""; }
+  // Reset captured zones
+  for (const cid of ["player-captured", "opponent-captured"]) {
+    const el = $(cid);
+    if (el) {
+      el.innerHTML = "";
+      delete el.dataset.inited;
+    }
+  }
+  overlay().innerHTML = "";
+  hideBanner();
+  hideYakuBanner();
+}
+
+async function animateInitialDeal(snap) {
+  ensureCapturedStructure("player-captured");
+  ensureCapturedStructure("opponent-captured");
+
+  const deckEl = $("deck-display");
+  deckEl.classList.remove("hidden");
+
+  // Pre-place every dealt card in its final position as invisible,
+  // so the layout is stable and FLIP-from-deck works without shifts.
+  const handIds = [...snap.hand].sort((a, b) => CARDS[a].month - CARDS[b].month || a - b);
+  const fieldIds = [...snap.field].sort((a, b) => CARDS[a].month - CARDS[b].month || a - b);
+  const oppCount = snap.opponent_hand_count;
+
+  const handContainer = $("hand-cards");
+  const fieldContainer = $("field-cards");
+  const oppContainer = $("opp-hand-cards");
+
+  for (const id of handIds) {
+    const el = cardEl(id);
+    el.style.visibility = "hidden";
+    handContainer.appendChild(el);
+  }
+  for (const id of fieldIds) {
+    const el = cardEl(id);
+    el.style.visibility = "hidden";
+    fieldContainer.appendChild(el);
+  }
+  const oppEls = [];
+  for (let i = 0; i < oppCount; i++) {
+    const el = makeOppBackEl();
+    el.style.visibility = "hidden";
+    oppContainer.appendChild(el);
+    oppEls.push(el);
+    oppHandBacks.push(el);
+  }
+
+  // Let layout settle
+  await new Promise(r => requestAnimationFrame(() => r()));
+
+  const deckRect = deckEl.getBoundingClientRect();
+
+  const totalToDeal = oppCount + fieldIds.length + handIds.length;
+  const startCount = snap.deck_remaining + totalToDeal;
+  renderDeckCount(startCount);
+
+  // Traditional deal: 4 to opponent, 4 to field, 4 to you — repeat.
+  const order = [];
+  const chunks = [[0, 4], [4, 8]];
+  for (const [s, e] of chunks) {
+    for (let i = s; i < e && i < oppEls.length; i++) order.push(oppEls[i]);
+    for (let i = s; i < e && i < fieldIds.length; i++) order.push(cardEl(fieldIds[i]));
+    for (let i = s; i < e && i < handIds.length; i++) order.push(cardEl(handIds[i]));
+  }
+
+  let dealtCount = 0;
+  const animations = order.map((el, i) => (async () => {
+    await sleep(i * T.deal_stagger);
+    dealtCount++;
+    renderDeckCount(startCount - dealtCount);
+    await flyFromDeckTo(el, deckRect, T.deal_fly);
+  })());
+  await Promise.all(animations);
+  renderDeckCount(snap.deck_remaining);
+}
+
+async function flyFromDeckTo(el, deckRect, duration) {
+  const toRect = el.getBoundingClientRect();
+  el.style.visibility = "visible";
+  const dx = deckRect.left - toRect.left;
+  const dy = deckRect.top - toRect.top;
+  const sw = toRect.width === 0 ? 1 : deckRect.width / toRect.width;
+  const sh = toRect.height === 0 ? 1 : deckRect.height / toRect.height;
+
+  el.style.transformOrigin = "top left";
+  el.style.transition = "none";
+  el.style.transform = `translate(${dx}px, ${dy}px) scale(${sw}, ${sh})`;
+  void el.offsetWidth;
+  el.style.transition = `transform ${duration}ms cubic-bezier(.22,1,.36,1)`;
+  el.style.transform = "";
+
+  await sleep(duration);
+  el.style.transition = "";
+  el.style.transformOrigin = "";
+}
+
+// ================================================================
+// Transition runner
+// ================================================================
+
+async function runTransitions(transitions) {
+  for (const tr of transitions) {
+    await runOneTransition(tr);
+  }
+}
+
+async function runOneTransition(tr) {
+  const actor = tr.actor;
+  const events = [...tr.events];
+
+  // If this transition is a match resolution, prepend a synthetic event
+  if (tr.phase_before === "HAND_MATCH" || tr.phase_before === "DRAW_MATCH") {
+    events.unshift({ type: "resolve_match", actor, chosen: tr.action });
+  }
+
+  for (const ev of events) {
+    await animateEvent(actor, ev);
+  }
+
+  // Keep displayed snapshot rough-synced (no-op; we rebuild from DOM)
+}
+
+async function animateEvent(actor, ev) {
+  switch (ev.type) {
+    case "hand_no_match":
+      await ev_handNoMatch(actor, ev.card);
+      break;
+    case "hand_match":
+      await ev_handMatch(actor, ev.card, [ev.matched]);
+      break;
+    case "hand_match_all":
+      await ev_handMatch(actor, ev.card, ev.matched);
+      break;
+    case "hand_choose":
+      await ev_handChoose(actor, ev.card);
+      break;
+    case "draw":
+      await ev_draw(ev.card);
+      break;
+    case "draw_match":
+      await ev_drawMatch(actor, ev.card, [ev.matched]);
+      break;
+    case "draw_match_all":
+      await ev_drawMatch(actor, ev.card, ev.matched);
+      break;
+    case "draw_choose":
+      await ev_drawChoose(actor, ev.card);
+      break;
+    case "resolve_match":
+      await ev_resolveMatch(actor, ev.chosen);
+      break;
+    case "yaku_formed":
+      await ev_yakuFormed(ev.player, ev.yaku, ev.points);
+      break;
+    case "koikoi":
+      await ev_call(ev.player, "こいこい!");
+      break;
+    case "showdown":
+      await ev_call(ev.player, "勝負!");
+      break;
+    case "round_end":
+      // The modal pops via finalizeFromState — nothing extra here.
+      await sleep(250);
+      break;
+    case "exhausted":
+      await ev_call(null, "流局");
+      break;
+    case "bonus_7plus":
+    case "bonus_opponent_koikoi":
+      // Minor; no dedicated animation
+      break;
+  }
+}
+
+// ---------- Event animations ----------
+
+async function ev_handNoMatch(actor, cardId) {
+  if (actor === 0) {
+    await sleep(120);
+    await flipTo(cardEl(cardId), el => {
+      const { row, ref } = fieldInsertRef(cardId);
+      row.insertBefore(el, ref);
+    }, { duration: T.fly });
+  } else {
+    const el = await revealFromOppHand(cardId);
+    await flipTo(el, e => {
+      const { row, ref } = fieldInsertRef(cardId);
+      row.insertBefore(e, ref);
+    }, { duration: T.fly });
+  }
+  await sleep(T.pause_after);
+}
+
+async function ev_handChoose(actor, cardId) {
+  // Card goes to field as a pending/highlighted card
+  if (actor === 0) {
+    await sleep(120);
+    await flipTo(cardEl(cardId), el => {
+      const { row, ref } = fieldInsertRef(cardId);
+      row.insertBefore(el, ref);
+    });
+  } else {
+    const el = await revealFromOppHand(cardId);
+    await flipTo(el, e => {
+      const { row, ref } = fieldInsertRef(cardId);
+      row.insertBefore(e, ref);
+    });
+  }
+  cardEl(cardId).classList.add("pending");
+  pendingCardId = cardId;
+  await sleep(T.pause_after);
+}
+
+async function ev_handMatch(actor, cardId, matchedIds) {
+  if (actor === 0) {
+    await sleep(100);
+  } else {
+    await revealFromOppHand(cardId); // played card now in overlay
+  }
+  await captureSequence(actor, cardId, matchedIds);
+}
+
+async function ev_draw(cardId) {
+  // Card comes off the deck, flips over, lands on field (no match).
+  await sleep(120);
+  await deckDrawReveal(cardId);
+  await flipTo(cardEl(cardId), el => {
+    const { row, ref } = fieldInsertRef(cardId);
+    row.insertBefore(el, ref);
+  }, { duration: T.fly });
+  const drawnEl = cardEl(cardId);
+  drawnEl.classList.add("just-drawn");
+  await sleep(T.pause_after);
+  drawnEl.classList.remove("just-drawn");
+}
+
+async function ev_drawMatch(actor, cardId, matchedIds) {
+  await sleep(120);
+  await deckDrawReveal(cardId);
+  await captureSequence(actor, cardId, matchedIds);
+}
+
+async function ev_drawChoose(actor, cardId) {
+  await sleep(120);
+  await deckDrawReveal(cardId);
+  await flipTo(cardEl(cardId), el => {
+    const { row, ref } = fieldInsertRef(cardId);
+    row.insertBefore(el, ref);
+  }, { duration: T.fly });
+  cardEl(cardId).classList.add("pending");
+  pendingCardId = cardId;
+  await sleep(T.pause_after);
+}
+
+async function ev_resolveMatch(actor, chosenId) {
+  // pendingCardId (on field) + chosenId (on field) → actor's captured
+  const pending = pendingCardId;
+  pendingCardId = null;
+  if (pending == null) return;
+  cardEl(pending).classList.remove("pending");
+  await captureSequence(actor, pending, [chosenId]);
+}
+
+// Shared: played card + matched list all fly to captured zone.
+// `cardEl(cardId)` must already be detached to overlay OR currently in hand/field.
+async function captureSequence(actor, cardId, matchedIds) {
+  const capId = actor === 0 ? "player-captured" : "opponent-captured";
+  const played = cardEl(cardId);
+  const matched = matchedIds.map(id => cardEl(id));
+
+  // Detach played to the overlay first so field/hand re-layouts
+  // settle BEFORE we capture the matched cards' rects.
+  if (played.parentElement !== overlay()) {
+    const pr = played.getBoundingClientRect();
+    placeAtOverlay(played, pr);
+  }
+  played.style.zIndex = "520";
+
+  // Now read the first matched card's rect (post-relayout)
+  const firstRect = matched[0].getBoundingClientRect();
+  await flyToPoint(played, {
+    left: firstRect.left,
+    top: firstRect.top - 6,
+    width: firstRect.width,
+    height: firstRect.height,
+  }, { duration: T.fly - 60 });
+
+  // Step 2: pulse both played and matched cards
+  played.classList.add("capture-glow");
+  for (const m of matched) m.classList.add("capture-glow");
+  await sleep(T.pause_meet);
+  played.classList.remove("capture-glow");
+  for (const m of matched) m.classList.remove("capture-glow");
+
+  // Step 3: fly all cards into captured zone. Trigger in parallel with tiny stagger.
+  const flights = [];
+  const all = [...matched, played];
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    const id = Number(el.dataset.cardId);
+    flights.push((async () => {
+      await sleep(i * 50);
+      await flipTo(el, e => {
+        const { row, ref } = capInsertRef(capId, id);
+        row.insertBefore(e, ref);
+      }, { duration: T.fly });
+      updateCapLabels(capId);
+    })());
+  }
+  await Promise.all(flights);
+  played.style.zIndex = "";
+  await sleep(T.pause_after);
+}
+
+// ---------- Primitives ----------
+
+async function revealFromOppHand(cardId) {
+  const back = oppHandBacks.pop();
+  let rect;
+  if (back) {
+    rect = back.getBoundingClientRect();
+    back.remove();
+  } else {
+    // Fallback — center of opp hand row
+    const row = $("opp-hand-cards").getBoundingClientRect();
+    rect = { left: row.left + row.width / 2 - 21, top: row.top + 10, width: 42, height: 60 };
+  }
+  const el = cardEl(cardId);
+  el.classList.remove("playable", "selectable", "pending");
+  el.classList.add("flipped");
+  placeAtOverlay(el, rect);
+  el.style.zIndex = "510";
+
+  // Lift slightly
+  await sleep(T.opp_pre);
+  el.classList.add("flipping");
+  el.classList.remove("flipped");
+  await sleep(T.flip);
+  el.classList.remove("flipping");
+  return el;
+}
+
+async function deckDrawReveal(cardId) {
+  const deckEl = $("deck-display");
+  if (!deckEl) return;
+  const deckRect = deckEl.getBoundingClientRect();
+
+  const el = cardEl(cardId);
+  el.classList.remove("playable", "selectable", "pending");
+  el.classList.add("flipped");
+  placeAtOverlay(el, deckRect);
+  el.style.zIndex = "510";
+
+  // Roll the top of the stack down by one
+  renderDeckCount(Math.max(0, visibleDeckCount - 1));
+
+  // A small upward lift then flip
+  const liftRect = {
+    left: deckRect.left,
+    top: deckRect.top - 18,
+    width: deckRect.width,
+    height: deckRect.height,
+  };
+  await flyToPoint(el, liftRect, { duration: 220 });
+  el.classList.add("flipping");
+  el.classList.remove("flipped");
+  await sleep(T.flip);
+  el.classList.remove("flipping");
+}
+
+// ---------- Yaku / Call banners ----------
+
+async function ev_yakuFormed(player, yaku, points) {
+  // Glow the captured cards that contribute to the yaku
+  const capId = player === 0 ? "player-captured" : "opponent-captured";
+  const contributing = findYakuContributors(player, yaku);
+
+  for (const id of contributing) {
+    const el = cardEls[id];
+    if (el) el.classList.add("yaku-glow");
+  }
+
+  await showYakuBanner(player, yaku, points);
+
+  for (const id of contributing) {
+    const el = cardEls[id];
+    if (el) el.classList.remove("yaku-glow");
+  }
+}
+
+function findYakuContributors(player, yakuList) {
+  const snap = player === 0 ? currentPlayerCap() : currentOppCap();
+  const set = new Set();
+  const byType = { "光": [], "種": [], "短冊": [], "カス": [] };
+  const byName = {};
+  for (const id of snap) {
+    const c = CARDS[id];
+    byType[c.card_type].push(id);
+    byName[c.name] = id;
+  }
+  for (const [name /*, pts*/] of yakuList) {
+    if (name === "五光" || name === "四光" || name === "雨四光" || name === "三光") {
+      for (const id of byType["光"]) set.add(id);
+    } else if (name === "赤短") {
+      for (const id of byType["短冊"]) if (CARDS[id].tanzaku_type === "赤短") set.add(id);
+    } else if (name === "青短") {
+      for (const id of byType["短冊"]) if (CARDS[id].tanzaku_type === "青短") set.add(id);
+    } else if (name === "たん") {
+      for (const id of byType["短冊"]) set.add(id);
+    } else if (name === "猪鹿蝶") {
+      for (const n of ["萩に猪", "紅葉に鹿", "牡丹に蝶"]) if (byName[n] != null) set.add(byName[n]);
+    } else if (name === "たね") {
+      for (const id of byType["種"]) set.add(id);
+    } else if (name === "カス") {
+      for (const id of byType["カス"]) set.add(id);
+    } else if (name === "花見で一杯") {
+      for (const n of ["桜に幕", "菊に盃"]) if (byName[n] != null) set.add(byName[n]);
+    } else if (name === "月見で一杯") {
+      for (const n of ["芒に月", "菊に盃"]) if (byName[n] != null) set.add(byName[n]);
+    }
+  }
+  return [...set];
+}
+
+function currentPlayerCap() {
+  const row = $("player-captured");
+  return [...row.querySelectorAll(".card")].map(e => Number(e.dataset.cardId));
+}
+function currentOppCap() {
+  const row = $("opponent-captured");
+  return [...row.querySelectorAll(".card")].map(e => Number(e.dataset.cardId));
+}
+
+async function showYakuBanner(player, yaku, points) {
+  const banner = $("yaku-banner");
+  const who = player === 0 ? "あなた" : "相手";
+  const yakuLines = yaku.map(y => `<span class="yaku-line"><span class="yaku-name">${y[0]}</span><span class="yaku-pts">${y[1]}点</span></span>`).join("");
+  banner.innerHTML = `
+    <div class="yaku-banner-inner">
+      <div class="yaku-heading">役!</div>
+      <div class="yaku-who">${who}</div>
+      <div class="yaku-list">${yakuLines}</div>
+      <div class="yaku-total">合計 ${points} 点</div>
+    </div>
+  `;
+  banner.classList.remove("hidden");
+  banner.classList.remove("banner-out");
+  void banner.offsetWidth;
+  banner.classList.add("banner-in");
+  await sleep(T.yaku_hold);
+  banner.classList.remove("banner-in");
+  banner.classList.add("banner-out");
+  await sleep(300);
+  banner.classList.add("hidden");
+}
+
+function hideYakuBanner() {
+  const banner = $("yaku-banner");
+  if (banner) {
+    banner.classList.add("hidden");
+    banner.classList.remove("banner-in", "banner-out");
+    banner.innerHTML = "";
+  }
+}
+
+async function ev_call(player, text) {
+  const banner = $("call-banner");
+  const cls = player === 0 ? "call-me" : player === 1 ? "call-opp" : "call-neutral";
+  banner.innerHTML = `<div class="call-inner ${cls}">${text}</div>`;
+  banner.classList.remove("hidden", "banner-out");
+  void banner.offsetWidth;
+  banner.classList.add("banner-in");
+  await sleep(T.banner_hold);
+  banner.classList.remove("banner-in");
+  banner.classList.add("banner-out");
+  await sleep(280);
+  banner.classList.add("hidden");
+}
+
+function hideBanner() {
+  const banner = $("call-banner");
+  if (banner) {
+    banner.classList.add("hidden");
+    banner.classList.remove("banner-in", "banner-out");
+    banner.innerHTML = "";
+  }
+}
+
+// ================================================================
+// Finalize / reconcile from authoritative state
+// ================================================================
+
+async function finalizeFromState(st) {
+  renderHeader();
+  renderPhaseMessage();
+  reconcileField(st);
+  reconcileHand(st);
+  reconcileOppHand(st);
+  reconcileCaptured(st);
+  renderDeckCount(st.deck_remaining);
+  renderYakuInfo();
+  renderKifuContent();
+  applyInteractivity(st);
+
+  // Modals
+  if (!st.done && st.phase === "KOIKOI") {
+    showKoikoiModal();
+  } else {
+    hideModal("koikoi-modal");
+  }
+
+  if (st.done) {
+    if (st.game_over) {
+      await sleep(700);
+      showGameOver();
+    } else {
+      await sleep(700);
+      showRoundResult();
+    }
+  }
+}
+
+function reorderContainer(container, targetIds) {
+  const targetSet = new Set(targetIds);
+  for (const c of [...container.children]) {
+    const cid = Number(c.dataset.cardId);
+    if (Number.isNaN(cid)) continue;
+    if (!targetSet.has(cid)) c.remove();
+  }
+  for (const id of targetIds) {
+    container.appendChild(cardEl(id));
+  }
+}
+
+function reconcileField(st) {
+  const target = [...st.field].sort((a, b) => {
+    if (CARDS[a].month !== CARDS[b].month) return CARDS[a].month - CARDS[b].month;
+    return a - b;
+  });
+  reorderContainer($("field-cards"), target);
+  for (const id of target) {
+    const el = cardEl(id);
+    el.classList.remove("flipped", "playable", "pending", "dimmed", "highlight-match", "just-drawn");
+    el.style.visibility = "";
+  }
+  if (st.pending_card != null) {
+    cardEl(st.pending_card).classList.add("pending");
+    pendingCardId = st.pending_card;
+  } else {
+    pendingCardId = null;
+  }
+}
+
+function reconcileHand(st) {
+  const target = [...st.hand].sort((a, b) => {
+    if (CARDS[a].month !== CARDS[b].month) return CARDS[a].month - CARDS[b].month;
+    return a - b;
+  });
+  reorderContainer($("hand-cards"), target);
+  for (const id of target) {
+    const el = cardEl(id);
+    el.classList.remove("flipped", "selectable", "pending", "dimmed", "highlight-match", "just-drawn");
+    el.style.visibility = "";
+  }
+}
+
+function reconcileOppHand(st) {
+  const container = $("opp-hand-cards");
+  const target = st.opponent_hand_count;
+  // Remove extras
+  while (oppHandBacks.length > target) {
+    const b = oppHandBacks.shift();
+    if (b && b.parentElement === container) b.remove();
+  }
+  // Also remove stray back elements not tracked
+  const currBacks = [...container.children].filter(c => c.classList.contains("opp-back"));
+  for (const b of currBacks) {
+    if (!oppHandBacks.includes(b)) b.remove();
+  }
+  while (oppHandBacks.length < target) {
+    const el = makeOppBackEl();
+    oppHandBacks.push(el);
+    container.appendChild(el);
+  }
+  // Ensure all tracked backs are mounted
+  for (const b of oppHandBacks) {
+    if (b.parentElement !== container) container.appendChild(b);
+  }
+}
+
+function reconcileCaptured(st) {
+  reconcileCapSide("player-captured", st.player_captured);
+  reconcileCapSide("opponent-captured", st.opponent_captured);
+}
+
+function reconcileCapSide(containerId, ids) {
+  ensureCapturedStructure(containerId);
+  const container = $(containerId);
+  const idSet = new Set(ids);
+
+  // Remove cards currently in this side that don't belong here anymore
+  for (const el of [...container.querySelectorAll(".card")]) {
+    const cid = Number(el.dataset.cardId);
+    if (!idSet.has(cid)) el.remove();
+  }
+
+  // Ensure each target card is in its matching row
+  for (const id of ids) {
+    const el = cardEl(id);
+    const type = CARDS[id].card_type;
+    const row = capRow(containerId, type);
+    if (el.parentElement !== row) row.appendChild(el);
+    el.classList.remove("flipped", "selectable", "playable", "pending", "dimmed", "highlight-match", "just-drawn");
+    el.style.visibility = "";
+  }
+
+  // Sort each row by month
+  for (const t of CAP_TYPES) {
+    const row = capRow(containerId, t);
+    const kids = [...row.children].sort((a, b) => {
+      const ma = CARDS[Number(a.dataset.cardId)].month;
+      const mb = CARDS[Number(b.dataset.cardId)].month;
+      if (ma !== mb) return ma - mb;
+      return Number(a.dataset.cardId) - Number(b.dataset.cardId);
+    });
+    for (const k of kids) row.appendChild(k);
+  }
+
+  updateCapLabels(containerId);
+}
+
+// ================================================================
+// Header / interactivity
+// ================================================================
+
+function renderHeader() {
   if (!state) return;
-
-  // Header info
   $("round-info").textContent = `${state.round}/${state.total_rounds}局`;
   $("score-info").textContent = `[あなた ${state.scores[0]} - ${state.scores[1]} 相手]`;
-  $("deck-count").textContent = state.deck_remaining;
-  $("deck-display").classList.toggle("hidden", state.deck_remaining === 0);
+}
 
-  // Phase message
+function renderPhaseMessage() {
   let msg = "";
   if (state.done) {
     if (state.winner === 0) msg = "あなたの勝ち!";
@@ -123,109 +1037,18 @@ function render() {
     else msg = "引き分け";
   } else if (state.phase === "KOIKOI") {
     msg = "";
+  } else if (state.current_player === 1 || (state.transitions && state.transitions.length && state.phase !== "HAND_PLAY")) {
+    msg = "";
   } else {
     msg = PHASE_MSG[state.phase] || "";
   }
   $("phase-message").textContent = msg;
-
-  renderHand();
-  renderField();
-  renderCaptured("player-captured", state.player_captured);
-  renderCaptured("opponent-captured", state.opponent_captured);
-  renderYakuInfo();
-  renderOpponentHand();
-  renderKifuContent();
-
-  // Modals
-  if (state.phase === "KOIKOI" && !state.done) {
-    showKoikoiModal();
-  } else {
-    hideModal("koikoi-modal");
-  }
-
-  if (state.done) {
-    if (state.game_over) {
-      showGameOver();
-    } else {
-      showRoundResult();
-    }
-  }
 }
 
-function renderHand() {
-  const container = $("hand-cards");
-  const oldIds = new Set([...container.querySelectorAll(".card")].map(c => c.dataset.cardId));
-  container.innerHTML = "";
-  const legal = new Set(state.legal_actions);
-  const isHandPhase = state.phase === "HAND_PLAY";
-  const fieldMonths = new Set(state.field.map(id => CARDS[id].month));
-
-  for (const id of state.hand) {
-    const canPlay = isHandPhase && legal.has(id);
-    const hasMatch = canPlay && fieldMonths.has(CARDS[id].month);
-    const el = createCardEl(id, {
-      selectable: hasMatch,
-      playable: canPlay && !hasMatch,
-      onClick: canPlay ? () => doAction(id) : null,
-    });
-    if (!oldIds.has(String(id))) el.classList.add("card-enter");
-    if (canPlay) {
-      el.addEventListener("mouseenter", () => highlightFieldMatches(id));
-      el.addEventListener("mouseleave", clearFieldHighlight);
-    }
-    container.appendChild(el);
-  }
-}
-
-function renderField() {
-  const container = $("field-cards");
-  const oldIds = new Set([...container.querySelectorAll(".card")].map(c => c.dataset.cardId));
-  container.innerHTML = "";
-  const legal = new Set(state.legal_actions);
-  const isMatchPhase = state.phase === "HAND_MATCH" || state.phase === "DRAW_MATCH";
-
-  if (state.pending_card !== null && state.pending_card !== undefined) {
-    const el = createCardEl(state.pending_card, { pending: true });
-    if (!oldIds.has(String(state.pending_card))) el.classList.add("card-enter");
-    container.appendChild(el);
-  }
-
-  for (const id of state.field) {
-    const selectable = isMatchPhase && legal.has(id);
-    const el = createCardEl(id, { selectable, onClick: selectable ? () => doAction(id) : null });
-    container.appendChild(el);
-  }
-}
-
-function renderCaptured(containerId, cardIds) {
-  const container = $(containerId);
-  container.innerHTML = "";
-
-  const groups = { "光": [], "種": [], "短冊": [], "カス": [] };
-  for (const id of cardIds) {
-    const t = CARDS[id].card_type;
-    (groups[t] || groups["カス"]).push(id);
-  }
-
-  const labels = { "光": "光", "種": "タネ", "短冊": "タン", "カス": "カス" };
-  for (const [type, ids] of Object.entries(groups)) {
-    const section = document.createElement("div");
-    section.className = "cap-section";
-
-    const label = document.createElement("div");
-    label.className = "cap-label";
-    label.textContent = `${labels[type]} ${ids.length}`;
-    section.appendChild(label);
-
-    const row = document.createElement("div");
-    row.className = "cap-row";
-    ids.sort((a, b) => CARDS[a].month - CARDS[b].month);
-    for (const id of ids) {
-      row.appendChild(createCardEl(id, { small: true }));
-    }
-    section.appendChild(row);
-    container.appendChild(section);
-  }
+function renderDeckCount(n) {
+  visibleDeckCount = n;
+  $("deck-count").textContent = n;
+  $("deck-display").classList.toggle("hidden", n === 0);
 }
 
 function renderYakuInfo() {
@@ -238,86 +1061,44 @@ function formatYaku(yakuList) {
   return yakuList.map(([name, pts]) => `${name}(${pts}点)`).join(" ");
 }
 
-function renderOpponentHand() {
-  const container = $("opp-hand-cards");
-  const n = state.opponent_hand_count;
-  const current = container.children.length;
+function applyInteractivity(st) {
+  // Clear all interactivity on all known card elements
+  for (const id in cardEls) {
+    const el = cardEls[id];
+    el.classList.remove("selectable", "playable", "dimmed", "highlight-match");
+    el.onclick = null;
+    el.onmouseenter = null;
+    el.onmouseleave = null;
+  }
+  if (!st || st.done) return;
+  if (st.current_player !== 0) return;
 
-  if (current > n) {
-    for (let i = current - 1; i >= n; i--) {
-      const card = container.children[i];
-      if (card) {
-        card.classList.add("card-exit");
-        setTimeout(() => card.remove(), 450);
-      }
+  const legal = new Set(st.legal_actions);
+
+  if (st.phase === "HAND_PLAY") {
+    const fieldMonths = new Set(st.field.map(id => CARDS[id].month));
+    for (const id of st.hand) {
+      if (!legal.has(id)) continue;
+      const el = cardEl(id);
+      const hasMatch = fieldMonths.has(CARDS[id].month);
+      if (hasMatch) el.classList.add("selectable");
+      else el.classList.add("playable");
+      el.onclick = () => doAction(id);
+      el.onmouseenter = () => highlightFieldMatches(id);
+      el.onmouseleave = clearFieldHighlight;
     }
-  } else {
-    for (let i = current; i < n; i++) {
-      const el = createCardBackEl();
-      el.classList.add("card-enter");
-      container.appendChild(el);
+  } else if (st.phase === "HAND_MATCH" || st.phase === "DRAW_MATCH") {
+    for (const id of st.field) {
+      if (!legal.has(id)) continue;
+      const el = cardEl(id);
+      el.classList.add("selectable");
+      el.onclick = () => doAction(id);
     }
   }
 }
 
-function createCardBackEl() {
-  const el = document.createElement("div");
-  el.className = "card card-back-img";
-  const img = document.createElement("img");
-  img.src = "/cards/back.svg";
-  img.alt = "裏";
-  img.draggable = false;
-  el.appendChild(img);
-  return el;
-}
-
-// ============ Opponent Animation ============
-
-async function renderWithOpponentAnimation() {
-  const actions = state.opponent_actions || [];
-  if (actions.length === 0) {
-    render();
-    return;
-  }
-
-  animating = true;
-  render();
-
-  const log = $("opp-action-log");
-  await sleep(400);
-
-  for (let i = 0; i < actions.length; i++) {
-    const act = actions[i];
-    const label = formatOpponentAction(act);
-    log.textContent = label;
-    log.classList.remove("hidden");
-    log.classList.remove("log-fade");
-    void log.offsetWidth;
-    log.classList.add("log-fade");
-    await sleep(1800);
-    if (i < actions.length - 1) await sleep(300);
-  }
-
-  await sleep(400);
-  log.classList.add("hidden");
-  animating = false;
-}
-
-function formatOpponentAction(act) {
-  if (act.phase === "HAND_PLAY") return `相手: ${act.card_name} を出した`;
-  if (act.phase === "HAND_MATCH") return `相手: ${act.card_name} を取った`;
-  if (act.phase === "DRAW_MATCH") return `相手: 山札から ${act.card_name} を取った`;
-  if (act.card_name === "こいこい") return "相手: こいこい!";
-  if (act.card_name === "勝負") return "相手: 勝負!";
-  return `相手: ${act.card_name || act.action}`;
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// ============ Field Highlight ============
-
-function highlightFieldMatches(handCardId) {
-  const month = CARDS[handCardId].month;
+function highlightFieldMatches(handId) {
+  const month = CARDS[handId].month;
   const fieldCards = $("field-cards").querySelectorAll(".card");
   let hasMatch = false;
   for (const el of fieldCards) {
@@ -341,32 +1122,9 @@ function clearFieldHighlight() {
   }
 }
 
-// ============ Card Element ============
-
-function createCardEl(cardId, opts = {}) {
-  const card = CARDS[cardId];
-  const el = document.createElement("div");
-
-  let cls = "card";
-  if (opts.selectable) cls += " selectable";
-  if (opts.playable) cls += " playable";
-  if (opts.selected) cls += " selected";
-  if (opts.pending) cls += " pending";
-
-  el.className = cls;
-  el.dataset.cardId = cardId;
-
-  const img = document.createElement("img");
-  img.src = `/cards/${cardId}.svg`;
-  img.alt = card.name;
-  img.draggable = false;
-  el.appendChild(img);
-
-  if (opts.onClick) el.addEventListener("click", opts.onClick);
-  return el;
-}
-
-// ============ Modals ============
+// ================================================================
+// Modals
+// ================================================================
 
 function showKoikoiModal() {
   const yakuHtml = state.player_yaku.map(([name, pts]) =>
@@ -381,7 +1139,7 @@ function showRoundResult() {
   const w = state.winner;
   const title = w === 0 ? "あなたの勝ち!" : w === 1 ? "相手の勝ち" : "引き分け";
   const yaku = w === 0 ? state.player_yaku : state.opponent_yaku;
-  const yakuStr = yaku.length > 0
+  const yakuStr = (yaku && yaku.length > 0)
     ? yaku.map(([n, p]) => `${n} (${p}点)`).join("、")
     : "なし";
 
@@ -418,7 +1176,9 @@ function showGameOver() {
 function showModal(id) { $(id).classList.remove("hidden"); }
 function hideModal(id) { $(id).classList.add("hidden"); }
 
-// ============ Kifu ============
+// ================================================================
+// Kifu
+// ================================================================
 
 function toggleKifu() {
   kifuOpen = !kifuOpen;
@@ -506,6 +1266,9 @@ async function loadKifuDetail(name) {
   $("kifu-list").innerHTML = html;
 }
 
-// ============ Util ============
+// ================================================================
+// Util
+// ================================================================
 
 function $(id) { return document.getElementById(id); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
