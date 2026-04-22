@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>花札こいこい</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <div id="start-screen" class="screen">
+    <h1>花札こいこい</h1>
+    <div class="start-options">
+      <label>対局数
+        <select id="round-select">
+          <option value="3">3局</option>
+          <option value="6">6局</option>
+          <option value="12" selected>12局</option>
+        </select>
+      </label>
+      <button id="btn-start" class="btn-main">対局開始</button>
+      <button id="btn-settings" class="btn-sub">ルール設定</button>
+      <button id="btn-kifu-list" class="btn-sub">棋譜一覧</button>
+    </div>
+  </div>
+
+  <div id="settings-screen" class="screen hidden">
+    <h2>ルール設定</h2>
+    <div class="settings-panel">
+      <div class="setting-group">
+        <div class="setting-title">得点倍率</div>
+        <label class="setting-row">
+          <span>こいこい倍 <small>相手がこいこい後にあがると得点2倍</small></span>
+          <input type="checkbox" id="rule-koikoi-double" checked>
+        </label>
+        <label class="setting-row">
+          <span>7点以上倍 <small>7点以上で得点2倍</small></span>
+          <input type="checkbox" id="rule-7plus-double" checked>
+        </label>
+      </div>
+      <div class="setting-group">
+        <div class="setting-title">役</div>
+        <label class="setting-row">
+          <span>花見で一杯 <small>桜に幕 + 菊に盃 = 5点</small></span>
+          <input type="checkbox" id="rule-hanami" checked>
+        </label>
+        <label class="setting-row">
+          <span>月見で一杯 <small>芒に月 + 菊に盃 = 5点</small></span>
+          <input type="checkbox" id="rule-tsukimi" checked>
+        </label>
+      </div>
+      <div class="setting-group">
+        <div class="setting-title">流局 (手札切れ)</div>
+        <label class="setting-row">
+          <input type="radio" name="rule-exhaust" value="oyaken" checked>
+          <span>親権 <small>親が6点で勝ち</small></span>
+        </label>
+        <label class="setting-row">
+          <input type="radio" name="rule-exhaust" value="koikoi-win">
+          <span>こいこい者勝ち <small>こいこい宣言者が勝ち、なければ親権</small></span>
+        </label>
+        <label class="setting-row">
+          <input type="radio" name="rule-exhaust" value="draw">
+          <span>引き分け <small>得点なし</small></span>
+        </label>
+      </div>
+    </div>
+    <button id="btn-settings-back" class="btn-main">戻る</button>
+  </div>
+
+  <div id="game-screen" class="screen hidden">
+    <header id="game-header">
+      <div class="header-left">
+        <span id="round-info"></span>
+        <span id="score-info"></span>
+      </div>
+      <div class="header-center">
+        <span id="phase-message"></span>
+      </div>
+      <div class="header-right">
+        <button id="btn-kifu-toggle" class="btn-small">棋譜</button>
+        <button id="btn-menu" class="btn-small">戻る</button>
+      </div>
+    </header>
+
+    <div id="board">
+      <div id="opponent-area">
+        <div class="area-label">相手の取り札 <span id="opp-yaku-info"></span></div>
+        <div id="opponent-captured" class="captured-grouped"></div>
+        <div id="opp-hand-cards" class="card-row opp-hand-row"></div>
+      </div>
+
+      <div id="opp-action-log" class="hidden"></div>
+
+      <div id="field-area">
+        <div class="area-label">場札</div>
+        <div id="field-zone">
+          <div id="deck-display">
+            <div class="deck-stack">
+              <img src="/cards/back.svg" alt="山札" class="deck-img">
+              <span id="deck-count"></span>
+            </div>
+          </div>
+          <div id="field-cards" class="field-grid"></div>
+        </div>
+      </div>
+
+      <div id="hand-area">
+        <div class="area-label">手札</div>
+        <div id="hand-cards" class="card-row"></div>
+      </div>
+    </div>
+
+    <div id="player-area">
+      <div class="area-label">あなたの取り札 <span id="player-yaku-info"></span></div>
+      <div id="player-captured" class="captured-grouped"></div>
+    </div>
+
+    <div id="koikoi-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>役が成立!</h2>
+        <div id="koikoi-yaku"></div>
+        <div class="modal-buttons">
+          <button id="btn-koikoi" class="btn-koikoi">こいこい</button>
+          <button id="btn-showdown" class="btn-showdown">勝負!</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="round-result-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2 id="result-title"></h2>
+        <div id="result-detail"></div>
+        <button id="btn-next-round" class="btn-main">次の局へ</button>
+      </div>
+    </div>
+
+    <div id="game-over-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2 id="gameover-title"></h2>
+        <div id="gameover-detail"></div>
+        <div class="modal-buttons">
+          <button id="btn-save-kifu" class="btn-sub">棋譜を保存</button>
+          <button id="btn-back-title" class="btn-main">タイトルへ</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="kifu-panel" class="hidden">
+      <div class="kifu-header">
+        <span>棋譜</span>
+        <button id="btn-kifu-close" class="btn-small">閉じる</button>
+      </div>
+      <div id="kifu-content"></div>
+    </div>
+  </div>
+
+  <div id="kifu-list-screen" class="screen hidden">
+    <h2>棋譜一覧</h2>
+    <div id="kifu-list"></div>
+    <button id="btn-kifu-back" class="btn-sub">戻る</button>
+  </div>
+
+</div>
+<script src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+numpy>=1.24
+gymnasium>=0.29
+sb3-contrib>=2.3
+stable-baselines3>=2.3
