@@ -8,11 +8,17 @@
 
 import json
 import os
+import random as _random
+import secrets
 import time
+from datetime import datetime, timezone
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
-from core import HIKARI, TANE, TANZAKU, KASU, MONTHS, check_yaku, total_yaku_points
+from core import (
+    HIKARI, TANE, TANZAKU, KASU, MONTHS,
+    Card, check_yaku, total_yaku_points,
+)
 from engine import (
     KoikoiEngine, Phase, rule_based_policy,
     ACTION_KOIKOI, ACTION_SHOWDOWN, NUM_CARDS,
@@ -21,37 +27,130 @@ from engine import (
 STATIC_DIR = Path(__file__).parent / "static"
 KIFU_DIR = Path(__file__).parent / "kifu"
 
+KIFU_VERSION = 2
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def card_info(c: Card) -> dict:
+    """Full card metadata — used in initial_deal where fan-out matters."""
+    return {
+        "id": c.id,
+        "name": c.name,
+        "month": c.month,
+        "card_type": c.card_type,
+        "tanzaku_type": c.tanzaku_type,
+    }
+
+
+def cards_info(cards) -> list:
+    return [card_info(c) for c in cards]
+
+
+def card_ref(c: Card) -> dict:
+    """Compact card reference — id + name for quick read/scan."""
+    return {"id": c.id, "name": c.name}
+
+
+def cards_ref(cards) -> list:
+    return [card_ref(c) for c in cards]
+
 
 class GameSession:
     def __init__(self, total_rounds=12, opponent="rule", rules=None):
         self.engine = KoikoiEngine(rules=rules)
-        self.rules = self.engine.rules
+        self.rules = dict(self.engine.rules)
         self.total_rounds = total_rounds
         self.current_round = 1
         self.scores = [0, 0]
         self.oya = 0
         self.opponent = opponent
-        self.kifu = {"rounds": [], "total_rounds": total_rounds}
-        self._round_actions = []
+        self._session_rng = _random.Random(secrets.randbits(64))
+
+        # Session identity + kifu path
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self.session_id = f"{ts}_{secrets.token_hex(2)}"
+        KIFU_DIR.mkdir(exist_ok=True)
+        self.kifu_path = KIFU_DIR / f"kifu_{self.session_id}.json"
+
+        self.kifu = {
+            "version": KIFU_VERSION,
+            "session_id": self.session_id,
+            "created_at": _now_iso(),
+            "finished_at": None,
+            "status": "in_progress",
+            "total_rounds": total_rounds,
+            "rules": dict(self.rules),
+            "opponent_type": opponent,
+            "scores": [0, 0],
+            "winner": None,
+            "rounds": [],
+        }
+
+        # Per-round mutable state — the "in-flight" round entry we append
+        # to kifu["rounds"] at start and fill in as play proceeds.
+        self._round_entry = None
+        self._round_decisions = []
+
         self._last_transitions = []
         self._round_fresh = True
+        self._deal_snapshot = None
+
         self._start_round()
 
+    # ------------------------------------------------------------------
+    # Round lifecycle
+    # ------------------------------------------------------------------
+
     def _start_round(self):
+        seed = None
+        redeals = 0
         while True:
-            info = self.engine.reset(oya=self.oya, seed=int(time.time() * 1000) % (2**31))
+            seed = self._session_rng.randint(0, 2**31 - 1)
+            info = self.engine.reset(oya=self.oya, seed=seed)
             special = info.get("special")
             if special == "redeal":
+                redeals += 1
                 continue
-            if self.engine.done:
-                self._record_special(special)
-                break
             break
-        self._round_actions = []
+
+        self._round_decisions = []
         self._round_fresh = True
+        self._round_entry = {
+            "round": self.current_round,
+            "oya": self.oya,
+            "seed": seed,
+            "redeals": redeals,
+            "started_at": _now_iso(),
+            "finished_at": None,
+            "special": special if special else None,
+            "initial_deal": {
+                "player_hand": cards_info(self.engine.players_hand[0]),
+                "opponent_hand": cards_info(self.engine.players_hand[1]),
+                "field": cards_info(self.engine.field),
+                "deck_order": cards_info(self.engine.deck),
+            },
+            "decisions": self._round_decisions,
+            "winner": None,
+            "score": 0,
+            "end_reason": None,
+            "yaku_at_end": {"player": [], "opponent": []},
+        }
+        self.kifu["rounds"].append(self._round_entry)
+
         # Capture the freshly-dealt snapshot so the client can animate
         # a deal from the deck before any opponent-oya moves are played.
         self._deal_snapshot = self._snapshot()
+
+        if self.engine.done:
+            # teshi / kuttsuki — round already decided at deal time
+            self._finish_round(end_reason="special")
+            self._last_transitions = []
+            self._auto_save()
+            return
+
         # If the opponent is the oya, their first turn is computed now
         # but delivered in transitions so the client plays them after
         # the deal animation finishes.
@@ -60,19 +159,10 @@ class GameSession:
             self._play_opponent_if_needed(opening_transitions)
         self._last_transitions = opening_transitions
 
-    def _record_special(self, special):
-        if special and ("teshi" in special or "kuttsuki" in special):
-            winner = self.engine.winner
-            score = self.engine.win_score
-            self.scores[winner] += score
-            self.kifu["rounds"].append({
-                "round": self.current_round,
-                "oya": self.oya,
-                "special": special,
-                "winner": winner,
-                "score": score,
-                "actions": [],
-            })
+        if self.engine.done:
+            self._finish_round(end_reason=self._infer_end_reason())
+
+        self._auto_save()
 
     def _snapshot(self):
         e = self.engine
@@ -127,8 +217,73 @@ class GameSession:
                 out.append({"type": kind, "args": list(rest)})
         return out
 
+    def _decision_view(self, actor):
+        """Snapshot of what `actor` sees at decision time (pre-step)."""
+        e = self.engine
+        opp = 1 - actor
+        pending = None
+        if e._pending_played is not None:
+            pending = card_ref(e._pending_played)
+        return {
+            "self_hand": cards_ref(e.players_hand[actor]),
+            "field": cards_ref(e.field),
+            "self_captured": cards_ref(e.players_captured[actor]),
+            "opponent_captured": cards_ref(e.players_captured[opp]),
+            "opponent_hand_count": len(e.players_hand[opp]),
+            "deck_remaining": len(e.deck),
+            "self_yaku": [[n, p] for n, p in check_yaku(e.players_captured[actor], self.rules)],
+            "opponent_yaku": [[n, p] for n, p in check_yaku(e.players_captured[opp], self.rules)],
+            "self_koikoi": bool(e.players_koikoi[actor]),
+            "opponent_koikoi": bool(e.players_koikoi[opp]),
+            "pending_card": pending,
+        }
+
+    def _decision_hidden(self, actor):
+        """Ground truth the actor cannot see — for oracle-guided analysis."""
+        e = self.engine
+        opp = 1 - actor
+        return {
+            "opponent_hand": cards_ref(e.players_hand[opp]),
+        }
+
+    def _action_info(self, phase_before: str, action: int) -> dict:
+        if action == ACTION_KOIKOI:
+            return {"kind": "koikoi"}
+        if action == ACTION_SHOWDOWN:
+            return {"kind": "showdown"}
+        card = self.engine.card_by_id(action)
+        if phase_before in ("HAND_MATCH", "DRAW_MATCH"):
+            kind = "match_pick"
+        else:
+            kind = "play_card"
+        return {"kind": kind, "id": card.id, "name": card.name}
+
     def _do_step(self, actor, action, transitions):
         phase_before = self.engine.phase.name
+
+        # Capture decision context BEFORE stepping.
+        visible = self._decision_view(actor)
+        hidden = self._decision_hidden(actor)
+        legal = list(self.engine.get_legal_actions())
+        act_info = self._action_info(phase_before, action)
+
+        # Step
+        info = self.engine.step(action)
+        events = self._serialize_events(info.get("events", []))
+
+        # Record decision in kifu
+        self._round_decisions.append({
+            "index": len(self._round_decisions),
+            "player": actor,
+            "phase": phase_before,
+            "visible": visible,
+            "hidden": hidden,
+            "legal_actions": legal,
+            "action": act_info,
+            "events": events,
+        })
+
+        # Record transition for the client animation layer
         card_id = action if action < NUM_CARDS else None
         if action < NUM_CARDS:
             card_name = self.engine.card_by_id(action).name
@@ -138,15 +293,13 @@ class GameSession:
             card_name = "勝負"
         else:
             card_name = None
-        self._record_action(actor, action)
-        info = self.engine.step(action)
         transitions.append({
             "actor": actor,
             "phase_before": phase_before,
             "action": action,
             "card_id": card_id,
             "card_name": card_name,
-            "events": self._serialize_events(info.get("events", [])),
+            "events": events,
             "snapshot": self._snapshot(),
         })
 
@@ -159,22 +312,6 @@ class GameSession:
     def _get_opponent_action(self):
         return rule_based_policy(self.engine, 1)
 
-    def _record_action(self, player, action):
-        phase = self.engine.phase.name
-        card_name = None
-        if action < NUM_CARDS:
-            card_name = self.engine.card_by_id(action).name
-        elif action == ACTION_KOIKOI:
-            card_name = "こいこい"
-        elif action == ACTION_SHOWDOWN:
-            card_name = "勝負"
-        self._round_actions.append({
-            "player": player,
-            "phase": phase,
-            "action": action,
-            "card_name": card_name,
-        })
-
     def do_action(self, action):
         transitions = []
         self._do_step(0, action, transitions)
@@ -183,13 +320,27 @@ class GameSession:
             self._play_opponent_if_needed(transitions)
 
         if self.engine.done:
-            self._finish_round()
+            self._finish_round(end_reason=self._infer_end_reason())
 
         self._last_transitions = transitions
         self._round_fresh = False
+        self._auto_save()
         return transitions
 
-    def _finish_round(self):
+    def _infer_end_reason(self) -> str:
+        """Infer end reason from the last events on the final decision."""
+        if not self._round_decisions:
+            return "special"
+        last_events = self._round_decisions[-1].get("events", [])
+        for ev in last_events:
+            if ev.get("type") == "showdown":
+                return "showdown"
+            if ev.get("type") == "exhausted":
+                # Distinguish 流局 (no yaku at all) from a koikoi-wins-by-exhaust.
+                return "ryuukyoku" if getattr(self.engine, "ryuukyoku", False) else "exhausted"
+        return "unknown"
+
+    def _finish_round(self, end_reason: str):
         winner = self.engine.winner
         score = self.engine.win_score
         if winner is not None:
@@ -198,21 +349,52 @@ class GameSession:
         p0_yaku = check_yaku(self.engine.players_captured[0], self.rules)
         p1_yaku = check_yaku(self.engine.players_captured[1], self.rules)
 
-        self.kifu["rounds"].append({
-            "round": self.current_round,
-            "oya": self.oya,
-            "winner": winner,
-            "score": score,
-            "player_yaku": [(name, pts) for name, pts in p0_yaku],
-            "opponent_yaku": [(name, pts) for name, pts in p1_yaku],
-            "actions": list(self._round_actions),
-        })
+        self._round_entry["winner"] = winner
+        self._round_entry["score"] = score
+        self._round_entry["end_reason"] = end_reason
+        self._round_entry["finished_at"] = _now_iso()
+        self._round_entry["yaku_at_end"] = {
+            "player": [[n, p] for n, p in p0_yaku],
+            "opponent": [[n, p] for n, p in p1_yaku],
+        }
+
+        self.kifu["scores"] = list(self.scores)
+
+        if self.current_round >= self.total_rounds:
+            self._finalize_session()
+
+    def _finalize_session(self):
+        self.kifu["status"] = "completed"
+        self.kifu["finished_at"] = _now_iso()
+        self.kifu["scores"] = list(self.scores)
+        s0, s1 = self.scores
+        if s0 > s1:
+            self.kifu["winner"] = 0
+        elif s1 > s0:
+            self.kifu["winner"] = 1
+        else:
+            self.kifu["winner"] = None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _auto_save(self):
+        KIFU_DIR.mkdir(exist_ok=True)
+        tmp = self.kifu_path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.kifu, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.kifu_path)
 
     def next_round(self):
         if self.current_round >= self.total_rounds:
             return False
         if self.engine.winner is not None:
             self.oya = self.engine.winner
+        elif getattr(self.engine, "ryuukyoku_oya_swap", False):
+            # 流局 "change" rule: no winner but 親 rotates.
+            self.oya = 1 - self.oya
+        # else: winner=None without swap → 親 unchanged
         self.current_round += 1
         self._start_round()
         return True
@@ -268,16 +450,10 @@ class GameSession:
         }
 
     def save_kifu(self):
-        KIFU_DIR.mkdir(exist_ok=True)
-        self.kifu["scores"] = list(self.scores)
-        self.kifu["winner"] = 0 if self.scores[0] > self.scores[1] else (
-            1 if self.scores[1] > self.scores[0] else None
-        )
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        path = KIFU_DIR / f"kifu_{ts}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.kifu, f, ensure_ascii=False, indent=2)
-        return str(path)
+        # The kifu is continuously auto-saved; this endpoint just
+        # confirms the current on-disk path for the user's session.
+        self._auto_save()
+        return str(self.kifu_path)
 
 
 game = None  # type: Optional[GameSession]
@@ -322,19 +498,33 @@ class GameHandler(SimpleHTTPRequestHandler):
             return
         content = path.read_bytes()
         self.send_response(200)
-        ct = "text/html"
-        if path.suffix == ".css":
+        suffix = path.suffix.lower()
+        is_text = True
+        if suffix == ".css":
             ct = "text/css"
-        elif path.suffix == ".js":
+        elif suffix == ".js":
             ct = "application/javascript"
-        elif path.suffix == ".json":
+        elif suffix == ".json":
             ct = "application/json"
-        elif path.suffix == ".svg":
+        elif suffix == ".webmanifest":
+            ct = "application/manifest+json"
+        elif suffix == ".svg":
             ct = "image/svg+xml"
-        self.send_header("Content-Type", f"{ct}; charset=utf-8")
+        elif suffix == ".png":
+            ct = "image/png"; is_text = False
+        elif suffix == ".ico":
+            ct = "image/x-icon"; is_text = False
+        else:
+            ct = "text/html"
+        if is_text:
+            self.send_header("Content-Type", f"{ct}; charset=utf-8")
+        else:
+            self.send_header("Content-Type", ct)
         self.send_header("Content-Length", len(content))
-        if path.suffix == ".svg":
+        if suffix in (".svg", ".png", ".ico"):
             self.send_header("Cache-Control", "public, max-age=86400")
+        elif suffix == ".webmanifest":
+            self.send_header("Cache-Control", "public, max-age=3600")
         self.end_headers()
         self.wfile.write(content)
 

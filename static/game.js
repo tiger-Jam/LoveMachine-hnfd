@@ -43,6 +43,7 @@ const oppHandBacks = [];  // queue of face-down opp hand placeholder elements
 // ================================================================
 
 document.addEventListener("DOMContentLoaded", async () => {
+  registerServiceWorker();
   CARDS = await api("GET", "/api/cards");
 
   $("btn-start").onclick = startGame;
@@ -59,6 +60,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-save-kifu").onclick = saveKifu;
   $("btn-back-title").onclick = backToTitle;
 });
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  // The browser silently refuses to register SW on non-secure origins
+  // (anything that isn't https:// or http://localhost). Swallowing the
+  // rejection keeps the plain-HTTP LAN case quiet.
+  navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+}
 
 async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -90,12 +99,14 @@ function hideAllModals() {
 // ================================================================
 
 function readRules() {
+  const pick = name => document.querySelector(`input[name="${name}"]:checked`).value.replace(/-/g, "_");
   return {
     koikoi_double: $("rule-koikoi-double").checked,
     seven_plus_double: $("rule-7plus-double").checked,
     hanami: $("rule-hanami").checked,
     tsukimi: $("rule-tsukimi").checked,
-    exhaust: document.querySelector('input[name="rule-exhaust"]:checked').value.replace("-", "_"),
+    multi_koikoi: pick("rule-multi-koikoi"),
+    ryuukyoku: pick("rule-ryuukyoku"),
   };
 }
 
@@ -503,11 +514,27 @@ async function runOneTransition(tr) {
     events.unshift({ type: "resolve_match", actor, chosen: tr.action });
   }
 
-  for (const ev of events) {
-    await animateEvent(actor, ev);
+  // The engine emits a plain `draw` event even when the drawn card
+  // immediately matches; a follow-up `draw_match` / `draw_match_all` /
+  // `draw_choose` on the same card re-runs the reveal itself. Skip the
+  // first `draw` so we don't animate the card coming off the deck twice.
+  const skipDraw = new Set();
+  for (let i = 0; i < events.length - 1; i++) {
+    const ev = events[i];
+    const next = events[i + 1];
+    if (ev.type === "draw" && next &&
+        (next.type === "draw_match" ||
+         next.type === "draw_match_all" ||
+         next.type === "draw_choose") &&
+        next.card === ev.card) {
+      skipDraw.add(i);
+    }
   }
 
-  // Keep displayed snapshot rough-synced (no-op; we rebuild from DOM)
+  for (let i = 0; i < events.length; i++) {
+    if (skipDraw.has(i)) continue;
+    await animateEvent(actor, events[i]);
+  }
 }
 
 async function animateEvent(actor, ev) {
@@ -762,7 +789,6 @@ async function deckDrawReveal(cardId) {
 
 async function ev_yakuFormed(player, yaku, points) {
   // Glow the captured cards that contribute to the yaku
-  const capId = player === 0 ? "player-captured" : "opponent-captured";
   const contributing = findYakuContributors(player, yaku);
 
   for (const id of contributing) {
@@ -1186,6 +1212,17 @@ function toggleKifu() {
   if (kifuOpen) renderKifuContent();
 }
 
+function phaseShort(p) {
+  return p.replace("HAND_", "手:").replace("DRAW_", "引:").replace("KOIKOI", "判断");
+}
+
+function actionLabel(act) {
+  if (!act) return "";
+  if (act.kind === "koikoi") return "こいこい";
+  if (act.kind === "showdown") return "勝負";
+  return act.name ?? `#${act.id}`;
+}
+
 async function renderKifuContent() {
   if (!kifuOpen) return;
   const data = await api("GET", "/api/kifu");
@@ -1193,6 +1230,15 @@ async function renderKifuContent() {
   container.innerHTML = "";
 
   if (!data.rounds) return;
+
+  // Session header (v2 only)
+  if (data.version === 2) {
+    const head = document.createElement("div");
+    head.className = "kifu-session-head";
+    const when = data.created_at ? data.created_at.replace("T", " ").slice(0, 16) : "";
+    head.textContent = `${when} ・ ${data.total_rounds}局 ・ 相手:${data.opponent_type || "rule"}`;
+    container.appendChild(head);
+  }
 
   for (const round of data.rounds) {
     const header = document.createElement("div");
@@ -1207,17 +1253,28 @@ async function renderKifuContent() {
     if (round.special) {
       const sp = document.createElement("div");
       sp.className = "kifu-entry";
-      sp.textContent = `特殊: ${round.special}`;
+      sp.textContent = `特殊配り: ${round.special}`;
       container.appendChild(sp);
     }
 
-    for (const act of (round.actions || [])) {
+    const decisions = round.decisions || round.actions || [];
+    for (const dec of decisions) {
       const entry = document.createElement("div");
-      entry.className = `kifu-entry player-${act.player}`;
-      const who = act.player === 0 ? "あなた" : "相手";
-      const phase = act.phase.replace("HAND_", "手:").replace("DRAW_", "引:").replace("KOIKOI", "判断");
-      entry.textContent = `${who} [${phase}] ${act.card_name || act.action}`;
+      entry.className = `kifu-entry player-${dec.player}`;
+      const who = dec.player === 0 ? "あなた" : "相手";
+      const phase = phaseShort(dec.phase);
+      const label = (dec.action && typeof dec.action === "object")
+        ? actionLabel(dec.action)
+        : (dec.card_name || `#${dec.action}`);
+      entry.textContent = `${who} [${phase}] ${label}`;
       container.appendChild(entry);
+    }
+
+    if (round.end_reason && round.end_reason !== "special") {
+      const end = document.createElement("div");
+      end.className = "kifu-entry kifu-end";
+      end.textContent = `終局: ${round.end_reason}`;
+      container.appendChild(end);
     }
   }
   container.scrollTop = container.scrollHeight;
@@ -1246,20 +1303,40 @@ async function showKifuList() {
 
 async function loadKifuDetail(name) {
   const data = await api("GET", `/api/kifu_load/${name}`);
-  let html = `<h3 style="color:var(--gold);margin-bottom:12px">${name}</h3>`;
-  html += `<div>スコア: ${data.scores[0]} - ${data.scores[1]}</div>`;
-  html += `<div>勝者: ${data.winner === 0 ? "あなた" : data.winner === 1 ? "相手" : "引分"}</div>`;
+  const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  let html = `<h3 style="color:var(--gold);margin-bottom:12px">${esc(name)}</h3>`;
+
+  if (data.version === 2) {
+    const when = data.created_at ? esc(data.created_at.replace("T"," ").slice(0,16)) : "";
+    html += `<div class="kifu-session-head">${when} ・ ${data.total_rounds}局 ・ 相手:${esc(data.opponent_type||"rule")} ・ ${esc(data.status||"")}</div>`;
+  }
+
+  const scores = data.scores || [0, 0];
+  html += `<div>スコア: ${scores[0]} - ${scores[1]}</div>`;
+  html += `<div>勝者: ${data.winner === 0 ? "あなた" : data.winner === 1 ? "相手" : "引分 / 進行中"}</div>`;
   html += `<hr style="border-color:#333;margin:12px 0">`;
 
-  for (const round of data.rounds) {
-    html += `<div class="kifu-round-header">第${round.round}局</div>`;
-    for (const act of (round.actions || [])) {
-      const who = act.player === 0 ? "あなた" : "相手";
-      html += `<div class="kifu-entry player-${act.player}">${who}: ${act.card_name || act.action}</div>`;
-    }
+  for (const round of (data.rounds || [])) {
+    let result = "";
     if (round.winner !== null && round.winner !== undefined) {
       const w = round.winner === 0 ? "あなた" : "相手";
-      html += `<div style="color:var(--gold)">→ ${w} +${round.score}点</div>`;
+      result = ` → ${w} +${round.score}`;
+    }
+    html += `<div class="kifu-round-header">第${round.round}局 (親:${round.oya === 0 ? "あなた" : "相手"})${esc(result)}</div>`;
+    if (round.special) {
+      html += `<div class="kifu-entry">特殊配り: ${esc(round.special)}</div>`;
+    }
+    const decisions = round.decisions || round.actions || [];
+    for (const dec of decisions) {
+      const who = dec.player === 0 ? "あなた" : "相手";
+      const phase = dec.phase ? phaseShort(dec.phase) : "";
+      const label = (dec.action && typeof dec.action === "object")
+        ? actionLabel(dec.action)
+        : (dec.card_name || `#${dec.action}`);
+      html += `<div class="kifu-entry player-${dec.player}">${who} [${phase}] ${esc(label)}</div>`;
+    }
+    if (round.end_reason && round.end_reason !== "special") {
+      html += `<div class="kifu-entry kifu-end">終局: ${esc(round.end_reason)}</div>`;
     }
   }
 

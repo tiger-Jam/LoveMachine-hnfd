@@ -55,10 +55,19 @@ class Phase(Enum):
 
 DEFAULT_RULES = {
     "koikoi_double": True,
-    "seven_plus_double": True,
+    "seven_plus_double": False,
     "hanami": True,
     "tsukimi": True,
-    "exhaust": "oyaken",  # "oyaken" | "koikoi_win" | "draw"
+    # 手札切れ時、両方がこいこい宣言済のときのローカルルール:
+    #   "oyaken"       : 親が 6 点で勝ち
+    #   "last_koikoi"  : 最後にこいこいした人が素点で勝ち
+    #   "first_koikoi" : 最初にこいこいした人が素点で勝ち
+    "multi_koikoi": "last_koikoi",
+    # 手札切れ時、誰もこいこいしていない (役未成立) ときのローカルルール:
+    #   "oyaken"    : 親が 6 点で勝ち
+    #   "no_change" : 勝者なし・0 点、次局も親そのまま
+    #   "change"    : 勝者なし・0 点、次局は親を交代
+    "ryuukyoku": "no_change",
 }
 
 
@@ -70,6 +79,10 @@ class KoikoiEngine:
         self.players_captured: list[list[Card]] = [[], []]
         self.players_koikoi: list[bool] = [False, False]
         self.players_prev_yaku: list[int] = [0, 0]
+        # Order in which koikoi was declared this round (for the
+        # multi-koikoi local rule at exhaust).
+        self.first_koikoi_player: Optional[int] = None
+        self.last_koikoi_player: Optional[int] = None
         self.field: list[Card] = []
         self.deck: list[Card] = []
         self.current_player: int = 0
@@ -78,6 +91,11 @@ class KoikoiEngine:
         self.done: bool = False
         self.winner: Optional[int] = None
         self.win_score: int = 0
+        # Set when _end_round_exhausted resolved as 流局 (no yaku) — the
+        # session uses this (plus the "ryuukyoku" rule) to decide who the
+        # next round's 親 should be.
+        self.ryuukyoku: bool = False
+        self.ryuukyoku_oya_swap: bool = False
         self._pending_played: Optional[Card] = None
         self._pending_matches: list[Card] = []
         self._rng = random.Random()
@@ -101,6 +119,8 @@ class KoikoiEngine:
         self.players_captured = [[], []]
         self.players_koikoi = [False, False]
         self.players_prev_yaku = [0, 0]
+        self.first_koikoi_player = None
+        self.last_koikoi_player = None
         self.field = cards[16:24]
         self.deck = cards[24:]
         self.current_player = oya
@@ -109,6 +129,8 @@ class KoikoiEngine:
         self.done = False
         self.winner = None
         self.win_score = 0
+        self.ryuukyoku = False
+        self.ryuukyoku_oya_swap = False
         self._pending_played = None
         self._pending_matches = []
 
@@ -268,6 +290,9 @@ class KoikoiEngine:
             info["events"].append(("koikoi", cp))
             self.players_koikoi[cp] = True
             self.players_prev_yaku[cp] = pts
+            if self.first_koikoi_player is None:
+                self.first_koikoi_player = cp
+            self.last_koikoi_player = cp
             self._next_turn(info)
 
     def _next_turn(self, info: dict):
@@ -298,38 +323,49 @@ class KoikoiEngine:
         self.done = True
         self.phase = Phase.DONE
 
-        exhaust_rule = self.rules["exhaust"]
+        p0k = self.players_koikoi[0]
+        p1k = self.players_koikoi[1]
+        n_koikoi = int(p0k) + int(p1k)
 
-        if exhaust_rule == "koikoi_win":
-            p0_koikoi = self.players_koikoi[0]
-            p1_koikoi = self.players_koikoi[1]
-            if p0_koikoi or p1_koikoi:
-                if p0_koikoi and p1_koikoi:
-                    p0_pts = total_yaku_points(check_yaku(self.players_captured[0], self.rules))
-                    p1_pts = total_yaku_points(check_yaku(self.players_captured[1], self.rules))
-                    if p0_pts >= p1_pts:
-                        self.winner = 0
-                        self.win_score = max(p0_pts, 6)
-                    else:
-                        self.winner = 1
-                        self.win_score = p1_pts
-                elif p0_koikoi:
-                    pts = total_yaku_points(check_yaku(self.players_captured[0], self.rules))
-                    self.winner = 0
-                    self.win_score = max(pts, 6)
-                else:
-                    pts = total_yaku_points(check_yaku(self.players_captured[1], self.rules))
-                    self.winner = 1
-                    self.win_score = max(pts, 6)
-            else:
+        if n_koikoi == 0:
+            # 誰もこいこいしていない = 役未成立 → 流局 (local rule)
+            self.ryuukyoku = True
+            rule = self.rules.get("ryuukyoku", "oyaken")
+            if rule == "change":
+                self.winner = None
+                self.win_score = 0
+                self.ryuukyoku_oya_swap = True
+            elif rule == "no_change":
+                self.winner = None
+                self.win_score = 0
+            else:  # "oyaken"
                 self.winner = self.oya_index
                 self.win_score = 6
-        elif exhaust_rule == "draw":
-            self.winner = None
-            self.win_score = 0
+        elif n_koikoi == 1:
+            # 片方のみこいこい → そのプレイヤーが素点で勝ち (倍加なし)
+            winner = 0 if p0k else 1
+            self.winner = winner
+            self.win_score = total_yaku_points(
+                check_yaku(self.players_captured[winner], self.rules)
+            )
         else:
-            self.winner = self.oya_index
-            self.win_score = 6
+            # 両方こいこい → 複数こいこいローカルルール
+            rule = self.rules.get("multi_koikoi", "oyaken")
+            if rule == "last_koikoi" and self.last_koikoi_player is not None:
+                w = self.last_koikoi_player
+                self.winner = w
+                self.win_score = total_yaku_points(
+                    check_yaku(self.players_captured[w], self.rules)
+                )
+            elif rule == "first_koikoi" and self.first_koikoi_player is not None:
+                w = self.first_koikoi_player
+                self.winner = w
+                self.win_score = total_yaku_points(
+                    check_yaku(self.players_captured[w], self.rules)
+                )
+            else:  # "oyaken"
+                self.winner = self.oya_index
+                self.win_score = 6
 
     # ------------------------------------------------------------------
     # 観測

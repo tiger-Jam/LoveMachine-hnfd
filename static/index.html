@@ -2,8 +2,21 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a0e">
+<meta name="color-scheme" content="dark">
 <title>花札こいこい</title>
+
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="こいこい">
+<meta name="format-detection" content="telephone=no">
+
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -36,7 +49,7 @@
         </label>
         <label class="setting-row">
           <span>7点以上倍 <small>7点以上で得点2倍</small></span>
-          <input type="checkbox" id="rule-7plus-double" checked>
+          <input type="checkbox" id="rule-7plus-double">
         </label>
       </div>
       <div class="setting-group">
@@ -51,18 +64,33 @@
         </label>
       </div>
       <div class="setting-group">
-        <div class="setting-title">流局 (手札切れ)</div>
+        <div class="setting-title">複数こいこい時 (手札切れで両方がこいこい宣言済)</div>
         <label class="setting-row">
-          <input type="radio" name="rule-exhaust" value="oyaken" checked>
+          <input type="radio" name="rule-multi-koikoi" value="oyaken">
           <span>親権 <small>親が6点で勝ち</small></span>
         </label>
         <label class="setting-row">
-          <input type="radio" name="rule-exhaust" value="koikoi-win">
-          <span>こいこい者勝ち <small>こいこい宣言者が勝ち、なければ親権</small></span>
+          <input type="radio" name="rule-multi-koikoi" value="last-koikoi" checked>
+          <span>最後にこいこい <small>最後にこいこい宣言した側が素点で勝ち</small></span>
         </label>
         <label class="setting-row">
-          <input type="radio" name="rule-exhaust" value="draw">
-          <span>引き分け <small>得点なし</small></span>
+          <input type="radio" name="rule-multi-koikoi" value="first-koikoi">
+          <span>最初にこいこい <small>最初にこいこい宣言した側が素点で勝ち</small></span>
+        </label>
+      </div>
+      <div class="setting-group">
+        <div class="setting-title">流局 (手札切れで役未成立)</div>
+        <label class="setting-row">
+          <input type="radio" name="rule-ryuukyoku" value="oyaken">
+          <span>親権 <small>親が6点で勝ち</small></span>
+        </label>
+        <label class="setting-row">
+          <input type="radio" name="rule-ryuukyoku" value="no-change" checked>
+          <span>親変えず <small>得点なし・次局も親そのまま</small></span>
+        </label>
+        <label class="setting-row">
+          <input type="radio" name="rule-ryuukyoku" value="change">
+          <span>親交代 <small>得点なし・次局は親を交代</small></span>
         </label>
       </div>
     </div>

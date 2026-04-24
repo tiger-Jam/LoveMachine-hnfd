@@ -1,0 +1,17 @@
+services:
+  hanafuda:
+    build: .
+    image: hanafuda-koikoi
+    container_name: hanafuda-koikoi
+    ports:
+      - "8800:8800"
+    environment:
+      # Override via `TZ=Europe/Berlin docker compose up` etc.
+      TZ: ${TZ:-Asia/Tokyo}
+    volumes:
+      # Kifu auto-save files — persisted across container restarts.
+      - ./kifu:/app/kifu
+      # Trained RL / LSTM models — read-only for the web server, but
+      # mounted rw so hot-swapping from the host works without rebuild.
+      - ./models:/app/models
+    restart: unless-stopped
