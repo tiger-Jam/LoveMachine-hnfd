@@ -83,15 +83,22 @@ LAN IP は `ipconfig` で確認。
 
 5. iPhone or Mac で WiFi `KoikoiTrainer-Setup` に参加 → ブラウザで `192.168.4.1` 開く
 
-6. フォーム入力：
-   - 自宅 WiFi の SSID + パスワード
-   - **M4 daemon**: 4060 PC の IP `192.168.x.x:8990` ← (M4 という表示だが Windows 機の 1 個目のコンテナ)
-   - **4060 daemon**: 4060 PC の IP `192.168.x.x:8991` ← (2 個目のコンテナ。1 コンテナ運用なら空欄)
-   - token: 通常空欄
+6. **シリアル経由で初回設定** (115200 baud で USB 接続したまま):
 
-7. Save → TAB5 が再起動 → ダッシュボード表示
+```
+SET WIFI <自宅WiFiのSSID> <パスワード>
+SET M4 192.168.x.x:8990                  ← 1 個目の daemon (Mac でも 4060 でも)
+SET PC 192.168.x.x:8991                  ← 2 個目の daemon (1 個運用なら空欄でも可)
+SET M4_NAME 4060-A                       ← 表示名カスタマイズ (任意)
+SET PC_NAME 4060-B                       ← (任意)
+SET TOKEN <token>                         ← KOIKOI_DAEMON_TOKEN を設定済なら
+SAVE
+```
 
-> NOTE: firmware の host slot 名は v0.1 で固定 (M4 / 4060)。両方を Windows コンテナに向ける運用で OK。次バージョンで slot 名カスタマイズ予定。
+`SAVE` で TAB5 が自動再起動 → ダッシュボード表示。
+
+**実行中も同じコマンドを Serial に送れば設定変更可能**（IP 切り替え等）。
+SAVE で永続化、SETUP で全消去 + setup mode。
 
 ---
 

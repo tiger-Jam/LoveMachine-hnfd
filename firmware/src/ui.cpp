@@ -6,6 +6,7 @@
 #include "ui.h"
 
 #include <M5Unified.h>
+#include <WiFi.h>
 #include "api_client.h"
 
 // レイアウト定数
@@ -33,9 +34,10 @@ static constexpr int N_BTNS = sizeof(kBtns) / sizeof(kBtns[0]);
 static ButtonHandler g_handler = nullptr;
 static const HostStatus* g_last_statuses = nullptr;
 static const char* const* g_last_hostnames = nullptr;
+// 注: ui_render に渡される const char* const[2] を保持するためのポインタ。
 
 void ui_init() {
-    M5.Display.setRotation(1);
+    M5.Display.setRotation(3);
     M5.Display.fillScreen(TFT_BLACK);
 }
 
@@ -153,7 +155,7 @@ static void draw_tile(int idx, int top_y, const HostStatus& s, const char* name)
     }
 }
 
-void ui_render(const HostStatus statuses[2], const char* hostnames[2]) {
+void ui_render(const HostStatus statuses[2], const char* const hostnames[2]) {
     g_last_statuses = statuses;
     g_last_hostnames = hostnames;
     draw_header();

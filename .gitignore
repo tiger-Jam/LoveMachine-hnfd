@@ -18,6 +18,9 @@ cpp_port/koikoi/_koikoi_native*.so
 cpp_port/koikoi/*.o
 cpp_port/build/
 
+# PlatformIO build cache (firmware)
+firmware/.pio/
+
 # Python
 __pycache__/
 *.pyc

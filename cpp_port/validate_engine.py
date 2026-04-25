@@ -24,7 +24,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from engine import KoikoiEngine, Phase, ACTION_KOIKOI, ACTION_SHOWDOWN
+# validate は「純 Python 実装 vs C++ 実装」を比較する。
+# engine.py が C++ shim になっているため、engine_py から直接 import する。
+from engine_py import KoikoiEngine, Phase, ACTION_KOIKOI, ACTION_SHOWDOWN
 from core import make_deck
 
 CPP_BIN = REPO / "cpp_port" / "koikoi" / "engine_dump"
