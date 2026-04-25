@@ -159,11 +159,15 @@ def run_nfsp(killer: GracefulKiller, args):
             break
         ts = env.reset()
         while not ts.last():
+            if killer.stop:
+                break
             cur = ts.observations["current_player"]
             if cur < 0:
                 continue
             out = agents[cur].step(ts)
             ts = env.step([out.action])
+        if killer.stop:
+            break
         for a in agents:
             a.step(ts)
 

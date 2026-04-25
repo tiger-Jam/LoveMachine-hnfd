@@ -125,7 +125,10 @@ def start_training(config: str = "default", extra_args: Optional[list[str]] = No
     return state
 
 
-def stop_training(timeout_sec: float = 30.0) -> dict:
+def stop_training(timeout_sec: float = 60.0) -> dict:
+    """SIGTERM で graceful 停止。timeout_sec 待っても死ななければ SIGKILL。
+    SIGKILL は CUDA state を壊すため極力避ける。run_train.py 側も
+    killer.stop を inner loop でチェックして即時応答する。"""
     state = _load_state()
     pid = state.get("pid")
     if not pid or not _proc_alive(pid):
@@ -145,7 +148,8 @@ def stop_training(timeout_sec: float = 30.0) -> dict:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
         except ProcessLookupError:
             pass
-        return {"stopped": True, "force_killed": True}
+        return {"stopped": True, "force_killed": True,
+                "warn": "SIGKILL used; CUDA state may be corrupted; restart container before next run"}
 
     state["stopped_at"] = datetime.now(timezone.utc).isoformat()
     _save_state(state)
