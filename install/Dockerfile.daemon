@@ -1,0 +1,106 @@
+# Dockerfile.daemon — Linux GPU (NVIDIA) 用 学習デーモンイメージ
+#
+# 使い方 (Windows + WSL2 + NVIDIA Container Toolkit):
+#   docker pull ghcr.io/tiger-jam/koikoi-trainer:latest
+#   docker run -d --name koikoi-trainer --gpus all \
+#       -p 8990:8990 \
+#       -v koikoi-runs:/app/runs \
+#       --restart unless-stopped \
+#       ghcr.io/tiger-jam/koikoi-trainer:latest
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates curl git build-essential \
+        cmake \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-dev python3.13-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Repo を clone (build context を小さく保つため git で取る)
+ARG REPO_URL=https://github.com/tiger-Jam/LoveMachine-hnfd.git
+ARG REPO_REF=main
+RUN git clone --depth 1 -b "${REPO_REF}" "${REPO_URL}" repo
+
+WORKDIR /build/repo
+
+# venv + python deps
+RUN python3.13 -m venv .venv313 \
+ && .venv313/bin/pip install --upgrade pip \
+ && .venv313/bin/pip install -r daemon/requirements.txt pybind11 \
+ && .venv313/bin/pip install \
+       --index-url https://download.pytorch.org/whl/cu121 \
+       torch
+
+# OpenSpiel fetch + build
+RUN git clone --depth 1 https://github.com/google-deepmind/open_spiel.git vendor/open_spiel \
+ && cd vendor/open_spiel && BUILD_WITH_APT=OFF bash ./install.sh || true \
+ && if [ -d open_spiel/json/json ] && [ ! -f open_spiel/json/CMakeLists.txt ]; then \
+        cd open_spiel/json && mv json _t && mv _t/* . && mv _t/.[!.]* . 2>/dev/null || true; rmdir _t || true; \
+    fi
+
+# koikoi ソースを vendor の games tree に置く
+RUN mkdir -p vendor/open_spiel/open_spiel/games \
+ && ln -sf /build/repo/cpp_port/koikoi vendor/open_spiel/open_spiel/games/koikoi
+
+# CMakeLists に koikoi を登録 (sed で挿入)
+RUN python3.13 -c "import pathlib; \
+p=pathlib.Path('vendor/open_spiel/open_spiel/games/CMakeLists.txt'); \
+t=p.read_text(); \
+old='  kuhn_poker/kuhn_poker.cc\n  kuhn_poker/kuhn_poker.h\n'; \
+new='  koikoi/koikoi.cc\n  koikoi/koikoi.h\n  koikoi/koikoi_engine.cc\n  koikoi/koikoi_engine.h\n  koikoi/koikoi_yaku.cc\n  koikoi/koikoi_yaku.h\n  koikoi/koikoi_cards.h\n'+old; \
+p.write_text(t.replace(old,new) if old in t else t)"
+
+# Build pyspiel
+RUN mkdir -p vendor/open_spiel/build \
+ && cd vendor/open_spiel/build \
+ && cmake -DPython3_EXECUTABLE=/build/repo/.venv313/bin/python ../open_spiel \
+ && make -j$(nproc) pyspiel
+
+# Build _koikoi_native.so
+RUN cd cpp_port && make pybind \
+        PY3=/build/repo/.venv313/bin/python \
+        PY_INC=$(/build/repo/.venv313/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+
+# ============================================================
+# Runtime stage (slimmer)
+# ============================================================
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    KOIKOI_DAEMON_PORT=8990 \
+    KOIKOI_DAEMON_HOST=0.0.0.0 \
+    KOIKOI_RUNS_DIR=/app/runs \
+    PYTHONPATH=/app/vendor/open_spiel/build/python:/app/vendor/open_spiel
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common ca-certificates \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv \
+        tmux curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/repo /app
+
+RUN mkdir -p /app/runs
+
+EXPOSE 8990
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8990/health || exit 1
+
+CMD ["/app/.venv313/bin/python", "/app/daemon/train_daemon.py"]

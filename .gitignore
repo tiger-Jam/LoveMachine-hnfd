@@ -1,6 +1,23 @@
 # Local game logs — never commit
 kifu/
 
+# OpenSpiel 本体は submodule 扱い (git clone 済み、~1GB)
+# cpp_port/koikoi/ の symlink は OpenSpiel 内に張る
+vendor/
+
+# Python 3.13 venv (学習用、OpenSpiel pytorch algos の依存込み)
+.venv313/
+
+# 学習中の runtime state (current_run.json, ログ, checkpoint)
+runs/
+
+# C++ build artifacts
+cpp_port/koikoi/yaku_dump
+cpp_port/koikoi/engine_dump
+cpp_port/koikoi/_koikoi_native*.so
+cpp_port/koikoi/*.o
+cpp_port/build/
+
 # Python
 __pycache__/
 *.pyc
