@@ -5,7 +5,7 @@
 // plain HTTP on a LAN IP, the browser silently refuses to register
 // this file; the app still works, it just falls back to regular fetch.
 
-const CACHE_NAME = "hanafuda-shell-v1";
+const CACHE_NAME = "hanafuda-shell-v4";
 
 const SHELL_URLS = [
   "/",
