@@ -104,11 +104,13 @@ def start_training(config: str = "default", extra_args: Optional[list[str]] = No
     if extra_args:
         cmd.extend(extra_args)
 
-    # 実行は新しい session group にする (kill しやすい)
+    # text mode + line buffering。binary unbuffered だと CUDA 初期化中に
+    # 子プロセスが silent crash することがあった。
+    log_fp = open(LOG_FILE, "a", buffering=1)
     proc = subprocess.Popen(
         cmd,
         cwd=ROOT,
-        stdout=open(LOG_FILE, "ab", buffering=0),
+        stdout=log_fp,
         stderr=subprocess.STDOUT,
         start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
