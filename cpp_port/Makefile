@@ -8,7 +8,16 @@
 OPEN_SPIEL_ROOT := $(abspath $(CURDIR)/../vendor/open_spiel)
 KOIKOI_DIR := $(CURDIR)/koikoi
 
-CXX := clang++
+# OS 判定: Linux と Mac で linker フラグが違う
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  CXX := clang++
+  PY_LDFLAGS := -undefined dynamic_lookup
+else
+  CXX := g++
+  PY_LDFLAGS :=
+endif
+
 CXXFLAGS := -std=c++17 -O2 -Wall -I$(OPEN_SPIEL_ROOT)
 
 .PHONY: all validate validate_yaku validate_engine pybind clean setup
@@ -25,7 +34,7 @@ PYBIND_SO := $(KOIKOI_DIR)/_koikoi_native$(PY_EXT)
 pybind: $(PYBIND_SO)
 
 $(PYBIND_SO): $(KOIKOI_DIR)/koikoi_engine.cc $(KOIKOI_DIR)/koikoi_yaku.cc $(KOIKOI_DIR)/koikoi_pybind.cc $(KOIKOI_DIR)/koikoi_engine.h $(KOIKOI_DIR)/koikoi_yaku.h $(KOIKOI_DIR)/koikoi_cards.h
-	$(CXX) -std=c++17 -O2 -Wall -shared -fPIC -undefined dynamic_lookup \
+	$(CXX) -std=c++17 -O2 -Wall -shared -fPIC $(PY_LDFLAGS) \
 	  -I"$(PY_INC)" -I"$(PB_INC)" -I"$(OPEN_SPIEL_ROOT)" \
 	  $(KOIKOI_DIR)/koikoi_engine.cc \
 	  $(KOIKOI_DIR)/koikoi_yaku.cc \

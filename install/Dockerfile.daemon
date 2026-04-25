@@ -67,9 +67,12 @@ RUN mkdir -p vendor/open_spiel/build \
  && make -j$(nproc) pyspiel
 
 # Build _koikoi_native.so
-RUN cd cpp_port && make pybind \
+# 注: python -c の quote が Dockerfile shell parser をすり抜けるよう、
+#     先に変数に取り出してから make に渡す。
+RUN PY_INC=$(/build/repo/.venv313/bin/python -c "import sysconfig; print(sysconfig.get_paths()['include'])") \
+ && cd cpp_port && make pybind \
         PY3=/build/repo/.venv313/bin/python \
-        PY_INC=$(/build/repo/.venv313/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+        PY_INC=$PY_INC
 
 # ============================================================
 # Runtime stage (slimmer)
