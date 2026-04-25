@@ -112,13 +112,24 @@ def run_nfsp(killer: GracefulKiller, args):
     from open_spiel.python.pytorch import nfsp
     import torch
 
+    # GPU 自動検出 (CUDA / MPS / CPU)。CPU 落ちすると NFSP の NN 訓練が
+    # 桁違いに遅くなるので最優先。
+    if torch.cuda.is_available():
+        device = "cuda"
+        torch.set_default_device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+        torch.set_default_device("mps")
+    else:
+        device = "cpu"
+
     game = pyspiel.load_game("koikoi")
     env = rl_environment.Environment(game)
     info_state_size = env.observation_spec()["info_state"][0]
     num_actions = env.action_spec()["num_actions"]
 
-    print(f"[nfsp] info_state={info_state_size} actions={num_actions} torch={torch.__version__}",
-          flush=True)
+    print(f"[nfsp] device={device} info_state={info_state_size} "
+          f"actions={num_actions} torch={torch.__version__}", flush=True)
 
     agents = [
         nfsp.NFSP(
