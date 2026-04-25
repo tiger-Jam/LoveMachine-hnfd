@@ -142,6 +142,7 @@ def run_nfsp(killer: GracefulKiller, args):
             learn_every=64,
             rl_learning_rate=args.rl_lr,
             sl_learning_rate=args.sl_lr,
+            device=device,           # CUDA / MPS / CPU を NFSP 内 DQN にも反映
         )
         for idx in range(2)
     ]
