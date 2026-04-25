@@ -104,14 +104,15 @@ def start_training(config: str = "default", extra_args: Optional[list[str]] = No
     if extra_args:
         cmd.extend(extra_args)
 
-    # text mode + line buffering。binary unbuffered だと CUDA 初期化中に
-    # 子プロセスが silent crash することがあった。
-    log_fp = open(LOG_FILE, "a", buffering=1)
+    # tee 経由で書き込ませると、CUDA 初期化中の子 silent crash を回避できる。
+    # /bin/sh -c で wrap して "python ... 2>&1 | tee LOG" を 1 プロセスとして起動。
+    shell_cmd = " ".join(shlex.quote(x) for x in cmd) + f" 2>&1 | tee {shlex.quote(str(LOG_FILE))}"
     proc = subprocess.Popen(
-        cmd,
+        ["/bin/sh", "-c", shell_cmd],
         cwd=ROOT,
-        stdout=log_fp,
-        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
